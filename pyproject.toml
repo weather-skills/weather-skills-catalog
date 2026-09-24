@@ -19,7 +19,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-skills-runner = { git = "https://github.com/tescalada/skills-runner" }
+skills-runner = { git = "https://github.com/weather-skills/skills-runner" }
 
 [tool.pytest.ini_options]
 
