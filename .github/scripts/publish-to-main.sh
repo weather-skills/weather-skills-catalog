@@ -62,10 +62,12 @@ git worktree add --detach "$work" origin/main
 # below and is not taken from either side's existing tree.
 if ! git -C "$work" merge-base --is-ancestor "$catalog_sha" HEAD; then
   merge_err=$(mktemp)
+  # -X ours: if both sides edited a file outside skills/, keep main.
+  # Non-conflicting catalog changes still apply. skills/ is replaced after this.
   if ! git -C "$work" \
     -c user.name='github-actions[bot]' \
     -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-    merge --no-commit --no-ff "$catalog_sha" 2>"$merge_err"; then
+    merge -X ours --no-commit --no-ff "$catalog_sha" 2>"$merge_err"; then
     echo "error: merging catalog into main failed." >&2
     cat "$merge_err" >&2
     git -C "$work" diff --name-only --diff-filter=U >&2 || true
