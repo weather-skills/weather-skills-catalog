@@ -73,7 +73,7 @@ The authoring guide — declaration, dimensions, units, and CLI flag names — i
 
 ## Contributing
 
-New skills enter the catalog as a git submodule on the `catalog` branch. Open a pull request against `catalog` that adds your skill repository. Reviewers read the pin, and CI checks the submodule out and lints its skills with `weather-skills-core`. After the pull request merges, [Publish catalog](.github/workflows/publish-catalog.yml) copies each skill to `skills/<provider>/<name>/` on `main`. Skillkit reads `main`. Pull requests that edit skill files directly on `main` will be overwritten by the next publish.
+New skills enter the catalog as a git submodule on the `catalog` branch. Open a pull request against `catalog` that adds your skill repository. Reviewers read the pin, and CI checks the submodule out and lints its skills with `weather-skills-core`. After the pull request merges, [Publish catalog](.github/workflows/publish-catalog.yml) replaces `skills/` on `main` with `skills/<provider>/<name>/` from the pinned repositories. Other files on `main` are merged and kept. Skillkit reads `main`. Edits under `skills/` on `main` are overwritten by the next publish.
 
 Your repository should use the same layout as the providers already in the catalog: skills under `skills/<name>/`, each with a `SKILL.md` and a script built on `weather-skills-core`. Keep tests in your repository; that is where skill behavior is tested before you propose a pin.
 

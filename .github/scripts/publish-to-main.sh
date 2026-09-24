@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Expand catalog-branch submodules into ordinary folders and publish that tree on main.
+# Publish catalog onto main.
+# skills/ is replaced from the pinned submodules.
+# Every other path is merged, so files that exist only on main stay put.
 set -euo pipefail
 
 repo_root=$(git rev-parse --show-toplevel)
@@ -55,16 +57,24 @@ cleanup() {
 trap cleanup EXIT
 
 git worktree add --detach "$work" origin/main
-find "$work" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
 
-# Publish the catalog files only. Submodule checkouts stay on the catalog
-# branch; main receives each skill at skills/<provider>/<name>/.
-rsync_excludes=(--exclude '.git' --exclude '.gitmodules')
-for path in "${paths[@]}"; do
-  rsync_excludes+=(--exclude "$path")
-done
-rsync -a "${rsync_excludes[@]}" "$repo_root/" "$work/"
+# Merge catalog into main, then drop submodule pointers. skills/ is rewritten
+# below and is not taken from either side's existing tree.
+if ! git -C "$work" merge-base --is-ancestor "$catalog_sha" HEAD; then
+  if ! git -C "$work" merge --no-commit --no-ff "$catalog_sha"; then
+    echo "error: merging catalog into main conflicted. Resolve that outside skills/ and push main, or update catalog." >&2
+    git -C "$work" diff --name-only --diff-filter=U >&2 || true
+    exit 1
+  fi
+  git -C "$work" rm -f --cached --ignore-unmatch -- .gitmodules
+  rm -f "$work/.gitmodules"
+  for path in "${paths[@]}"; do
+    git -C "$work" rm -rf --cached --ignore-unmatch -- "$path"
+    rm -rf "$work/$path"
+  done
+fi
 
+rm -rf "$work/skills"
 mkdir -p "$work/skills"
 shopt -s nullglob
 for path in "${paths[@]}"; do
@@ -97,8 +107,8 @@ if find "$work" -mindepth 2 -name '.git' -print -quit | grep -q .; then
   exit 1
 fi
 
-git -C "$work" add -A
-if git -C "$work" diff --cached --quiet; then
+git -C "$work" add -A -- skills
+if git -C "$work" diff --cached --quiet && ! git -C "$work" rev-parse -q --verify MERGE_HEAD >/dev/null; then
   echo "main already matches catalog $catalog_sha"
   exit 0
 fi
@@ -113,10 +123,10 @@ fi
 git -C "$work" \
   -c user.name='github-actions[bot]' \
   -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-  commit --quiet -m "$(cat <<EOF
-Publish expanded catalog.
+  commit --quiet --allow-empty -m "$(cat <<EOF
+Publish skills from catalog.
 
-Expand the submodules pinned on catalog at ${catalog_sha} into ordinary folders.
+Replace skills/ with the submodules pinned at ${catalog_sha}. Merge every other path.
 
 [skip ci]
 EOF

@@ -1,7 +1,7 @@
 name: Publish catalog
 
-# Merges to catalog arrive as pushes. Expand each submodule into a normal
-# folder and fast-forward main to that tree.
+# Merges to catalog arrive as pushes. Replace skills/ on main from the
+# submodules, and merge every other path.
 
 on:
   push:
