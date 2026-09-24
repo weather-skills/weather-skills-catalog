@@ -61,11 +61,18 @@ git worktree add --detach "$work" origin/main
 # Merge catalog into main, then drop submodule pointers. skills/ is rewritten
 # below and is not taken from either side's existing tree.
 if ! git -C "$work" merge-base --is-ancestor "$catalog_sha" HEAD; then
-  if ! git -C "$work" merge --no-commit --no-ff "$catalog_sha"; then
-    echo "error: merging catalog into main conflicted. Resolve that outside skills/ and push main, or update catalog." >&2
+  merge_err=$(mktemp)
+  if ! git -C "$work" \
+    -c user.name='github-actions[bot]' \
+    -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+    merge --no-commit --no-ff "$catalog_sha" 2>"$merge_err"; then
+    echo "error: merging catalog into main failed." >&2
+    cat "$merge_err" >&2
     git -C "$work" diff --name-only --diff-filter=U >&2 || true
+    rm -f "$merge_err"
     exit 1
   fi
+  rm -f "$merge_err"
   git -C "$work" rm -f --cached --ignore-unmatch -- .gitmodules
   rm -f "$work/.gitmodules"
   for path in "${paths[@]}"; do
