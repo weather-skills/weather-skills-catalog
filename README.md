@@ -2,33 +2,33 @@
 
 Weather skills turn scientific weather-data pipelines into fixed, reviewable tools for agentic AI. An assistant fetches a forecast or an observation, clips it, aggregates it, and plots it by running checked-in skills in order. Each output file carries provenance — the skill, version, and arguments that produced it — so someone else can rerun or audit the chain. Skills are plain Python scripts. They run in any environment with a code-execution runtime and [uv](https://docs.astral.sh/uv/), and they read and write [CF-compliant](https://cfconventions.org/) Zarr, so one skill's output is the next skill's input.
 
-This repository is that catalog. `main` is the canonical tree consumers install. The [`catalog`](https://github.com/weather-skills/weather-skills-catalog/tree/catalog) branch records each skill repository as a git submodule. Merging to `catalog` expands those submodules and publishes them on `main` as ordinary folders.
+This repository is that catalog. `main` is the canonical tree consumers install, with each skill at `skills/<provider>/<name>/`. The [`catalog`](https://github.com/weather-skills/weather-skills-catalog/tree/catalog) branch records each skill repository as a git submodule. Merging to `catalog` publishes those skills on `main`.
 
 Early stage: interfaces, the standard dataset, and skill boundaries may change.
 
 ## Using the skills
 
-Install from `main` of [weather-skills/weather-skills-catalog](https://github.com/weather-skills/weather-skills-catalog). Each provider stays in its own folder for the CLI. Publish also copies every skill to `skills/<provider>/<name>/` (for example `skills/weather-skills/clip-region`), which is the tree skillkit checks out.
+Install agent skills from `main` of [weather-skills/weather-skills-catalog](https://github.com/weather-skills/weather-skills-catalog). Each skill is `skills/<provider>/<name>/`, for example `skills/weather-skills/clip-region`. The command-line tools stay in the provider repositories.
 
 ### Command line
 
-For ad-hoc use, with no agent, each provider folder is a CLI. `uvx` runs it without a permanent install:
+For ad-hoc use, with no agent, each provider repository is a CLI. `uvx` runs it without a permanent install:
 
 ```bash
 # List the Rhiza weather skills
-uvx --from "git+https://github.com/weather-skills/weather-skills-catalog#subdirectory=weather-skills" weather-skills
+uvx --from git+https://github.com/rhiza-research/weather-skills weather-skills
 
 # Run one
-uvx --from "git+https://github.com/weather-skills/weather-skills-catalog#subdirectory=weather-skills" weather-skills <skill> [args]
+uvx --from git+https://github.com/rhiza-research/weather-skills weather-skills <skill> [args]
 
 # Climate Hazards Center skills
-uvx --from "git+https://github.com/weather-skills/weather-skills-catalog#subdirectory=chc-skills" chc-skills
+uvx --from git+https://github.com/rhiza-research/chc-skills chc-skills
 ```
 
 Or install a provider once and invoke it directly:
 
 ```bash
-uv tool install "git+https://github.com/weather-skills/weather-skills-catalog#subdirectory=weather-skills"
+uv tool install git+https://github.com/rhiza-research/weather-skills
 weather-skills                              # list
 weather-skills <skill> [args]               # run one
 ```
@@ -74,11 +74,11 @@ The authoring guide — declaration, dimensions, units, and CLI flag names — i
 
 ## Contributing
 
-New skills enter the catalog as a git submodule on the `catalog` branch. Open a pull request against `catalog` that adds your skill repository. Reviewers read the pin, and CI checks the submodule out and lints its skills with `weather-skills-core`. After the pull request merges, [Publish catalog](.github/workflows/publish-catalog.yml) expands every submodule into a normal folder and pushes that tree to `main`. Install and skillkit both read `main`. Pull requests that edit skill files directly on `main` will be overwritten by the next publish.
+New skills enter the catalog as a git submodule on the `catalog` branch. Open a pull request against `catalog` that adds your skill repository. Reviewers read the pin, and CI checks the submodule out and lints its skills with `weather-skills-core`. After the pull request merges, [Publish catalog](.github/workflows/publish-catalog.yml) copies each skill to `skills/<provider>/<name>/` on `main`. Skillkit reads `main`. Pull requests that edit skill files directly on `main` will be overwritten by the next publish.
 
 Your repository should use the same layout as the providers already in the catalog: skills under `skills/<name>/`, each with a `SKILL.md` and a script built on `weather-skills-core`. Keep tests in your repository; that is where skill behavior is tested before you propose a pin.
 
-Use an HTTPS submodule URL so CI can clone a public repository. The folder name is the name consumers will see on `main`.
+Use an HTTPS submodule URL so CI can clone a public repository. The submodule folder name is the `<provider>` segment on `main`.
 
 ```bash
 git fetch origin catalog
