@@ -15,9 +15,11 @@ cli = "weather-skills"
 
 [dependency-groups]
 dev = [
+    "skills-runner"
 ]
 
 [tool.uv.sources]
+skills-runner = { git = "https://github.com/tescalada/skills-runner" }
 
 [tool.pytest.ini_options]
 
