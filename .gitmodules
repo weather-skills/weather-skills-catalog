@@ -1,0 +1,8 @@
+[submodule "weather-skills"]
+	path = weather-skills
+	url = https://github.com/rhiza-research/weather-skills.git
+	branch = main
+[submodule "chc-skills"]
+	path = chc-skills
+	url = https://github.com/rhiza-research/chc-skills.git
+	branch = main
