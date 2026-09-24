@@ -8,7 +8,7 @@ Early stage: interfaces, the standard dataset, and skill boundaries may change.
 
 ## Using the skills
 
-Install from `main` of [weather-skills/weather-skills-catalog](https://github.com/weather-skills/weather-skills-catalog). Each provider is a folder (`weather-skills`, `chc-skills`, …) with its skills under `skills/<name>/`.
+Install from `main` of [weather-skills/weather-skills-catalog](https://github.com/weather-skills/weather-skills-catalog). Each provider stays in its own folder for the CLI. Publish also copies every skill to `skills/<provider>/<name>/` (for example `skills/weather-skills/clip-region`), which is the tree skillkit checks out.
 
 ### Command line
 

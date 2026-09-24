@@ -64,6 +64,34 @@ rsync -a \
   --exclude '.gitmodules' \
   "$repo_root/" "$work/"
 
+# skillkit sparse-checkouts root paths such as skills/ and then walks that
+# tree. Provider repos keep their own skills/<name>/ for the CLI; copy each
+# skill to skills/<provider>/<name>/ so the sparse checkout contains it.
+mkdir -p "$work/skills"
+shopt -s nullglob
+for path in "${paths[@]}"; do
+  provider=$(basename "$path")
+  for skill_dir in "$work/$path"/skills/*/; do
+    if [[ ! -f "${skill_dir}SKILL.md" ]]; then
+      continue
+    fi
+    name=$(basename "$skill_dir")
+    dest="$work/skills/$provider/$name"
+    mkdir -p "$dest"
+    rsync -a --exclude '.git' "${skill_dir}" "$dest/"
+  done
+done
+shopt -u nullglob
+
+shopt -s nullglob
+root_skills=("$work"/skills/*/*/SKILL.md)
+shopt -u nullglob
+if [[ ${#root_skills[@]} -eq 0 ]]; then
+  echo "error: skills/<provider>/<name>/ at the catalog root is empty" >&2
+  exit 1
+fi
+echo "catalog skills/: ${#root_skills[@]}"
+
 # The worktree's own .git sits at the root. Anything deeper is a submodule
 # checkout that would be recorded as a gitlink.
 if find "$work" -mindepth 2 -name '.git' -print -quit | grep -q .; then
@@ -100,7 +128,7 @@ if [[ "${DRY_RUN:-}" == 1 ]]; then
   echo "DRY_RUN: would publish $(git -C "$work" rev-parse --short HEAD) onto main."
   git -C "$work" ls-tree --name-only HEAD
   echo "files: $(git -C "$work" ls-files | wc -l | tr -d ' ')"
-  echo "skills: $(git -C "$work" ls-files '*/SKILL.md' | wc -l | tr -d ' ')"
+  echo "root skills: $(git -C "$work" ls-files 'skills/*/*/SKILL.md' | wc -l | tr -d ' ')"
   exit 0
 fi
 
