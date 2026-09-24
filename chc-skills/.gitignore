@@ -1,0 +1,11 @@
+.DS_Store
+.claude
+uv.lock
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/

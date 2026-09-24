@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "rhiza-chc",
+  "displayName": "CHC Skills",
+  "description": "Climate Hazards Center data skills for SubC forecasts, Indian Ocean Dipole analysis, CPC MJO forecast diagrams, and Africa ITF figures.",
+  "author": {
+    "name": "Rhiza Research",
+    "url": "https://github.com/rhiza-research"
+  },
+  "homepage": "https://github.com/rhiza-research/chc-skills",
+  "repository": "https://github.com/rhiza-research/chc-skills",
+  "license": "MIT",
+  "keywords": [
+    "weather",
+    "climate",
+    "CHC",
+    "SubC",
+    "IOD",
+    "MJO",
+    "ITF",
+    "geospatial",
+    "zarr",
+    "xarray"
+  ]
+}

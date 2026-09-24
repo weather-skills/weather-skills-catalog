@@ -1,0 +1,29 @@
+name: Catalog check
+
+# Pull requests into catalog pin skill repositories as submodules. Check
+# each pin out and lint its skills. Skill behavior tests stay in the
+# provider repository.
+
+on:
+  pull_request:
+    branches: [catalog]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: false
+
+      - uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Check out submodules and lint skills
+        env:
+          CORE: git+https://github.com/rhiza-research/weather-skills-core@main
+        run: bash .github/scripts/check-catalog.sh

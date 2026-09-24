@@ -1,0 +1,294 @@
+name: Version bump
+
+# On push to main: bump `_SKILL_VERSION` for changed skills, then publish a lean
+# plugin payload to `plugin-dist`. Uses GITHUB_TOKEN (configure a release App later
+# if branch protection requires it).
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: version-bump-main
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      has_skip_ci: ${{ steps.flags.outputs.has_skip_ci }}
+    steps:
+      - name: Compute skip-ci flag
+        id: flags
+        env:
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          if printf '%s' "$HEAD_MESSAGE" | python3 -c '
+          import re, sys
+          msg = sys.stdin.read()
+          if re.search(r"(?:\A|\s)\[skip ci\](?:\s|\Z)", msg):
+              sys.exit(0)
+          sys.exit(1)
+          '; then
+            echo "has_skip_ci=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_skip_ci=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  bump:
+    needs: preflight
+    if: needs.preflight.outputs.has_skip_ci != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Identify changed skill directories
+        id: changed
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            if parent=$(git rev-parse --verify --quiet "${AFTER_SHA}^"); then
+              BEFORE_SHA="$parent"
+              changed=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" -- 'skills/*/*' \
+                | awk -F/ 'NF >= 2 && $1 == "skills" { print $2 }' | sort -u)
+            else
+              changed=$(git diff-tree --no-commit-id --name-only -r "$AFTER_SHA" -- 'skills/*/*' \
+                | awk -F/ 'NF >= 2 && $1 == "skills" { print $2 }' | sort -u)
+            fi
+          else
+            changed=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" -- 'skills/*/*' \
+              | awk -F/ 'NF >= 2 && $1 == "skills" { print $2 }' | sort -u)
+          fi
+          if [ -z "$changed" ]; then
+            echo "No skill directories changed; exiting cleanly."
+            echo "skills=" >> "$GITHUB_OUTPUT"
+          else
+            echo "Changed skills:"
+            printf '  %s\n' $changed
+            {
+              echo "skills<<EOF"
+              echo "$changed"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine bump kind from merged PR labels
+        id: kind
+        if: steps.changed.outputs.skills != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if pr_json="$(gh api "repos/${REPO}/commits/${SHA}/pulls" 2>&1)"; then
+            :
+          else
+            echo "gh api failed: $pr_json" >&2
+            pr_json="[]"
+          fi
+          labels=$(printf '%s' "$pr_json" | python3 -c 'import json, sys
+          data = json.load(sys.stdin)
+          if data:
+              for label in data[0].get("labels", []):
+                  name = label.get("name", "")
+                  if name:
+                      print(name)
+          ')
+          kind=patch
+          if printf '%s\n' "$labels" | grep -qx 'release: major'; then
+            kind=major
+          elif printf '%s\n' "$labels" | grep -qx 'release: minor'; then
+            kind=minor
+          fi
+          echo "Bump kind: $kind"
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+
+      - name: Bump each affected skill and stage changes
+        id: bump
+        if: steps.changed.outputs.skills != ''
+        env:
+          KIND: ${{ steps.kind.outputs.kind }}
+          SKILLS: ${{ steps.changed.outputs.skills }}
+        run: |
+          set -euo pipefail
+          bumps_file="${RUNNER_TEMP}/bumps.txt"
+          : > "$bumps_file"
+          read_version() {
+            local skill="$1"
+            python3 - "$skill" <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path("tools").resolve()))
+          from rhiza_version_re import _VERSION_LINE_RE_VALUE
+
+          skill = sys.argv[1]
+          scripts = Path("skills") / skill / "scripts"
+          values = []
+          for py in sorted(scripts.rglob("*.py")):
+              match = _VERSION_LINE_RE_VALUE.search(py.read_text(encoding="utf-8"))
+              if match:
+                  values.append(match.group("value"))
+          if not values:
+              raise SystemExit(f"{scripts}: no _SKILL_VERSION constant")
+          if len(set(values)) != 1:
+              raise SystemExit(f"{scripts}: disagreeing _SKILL_VERSION values: {values}")
+          print(values[0])
+          PY
+          }
+          while IFS= read -r skill; do
+            [ -z "$skill" ] && continue
+            if [ ! -d "skills/${skill}/scripts" ]; then
+              echo "Skipping ${skill}: no scripts/"
+              continue
+            fi
+            old_version=$(read_version "$skill")
+            python3 .github/scripts/bump-skill-version.py --skill "$skill" --kind "$KIND"
+            new_version=$(read_version "$skill")
+            git add "skills/${skill}/"
+            printf -- '- %s: %s -> %s\n' "$skill" "$old_version" "$new_version" >> "$bumps_file"
+          done <<< "$SKILLS"
+          bump_count=$(wc -l < "$bumps_file" | tr -d ' ')
+          echo "bumps_file=${bumps_file}" >> "$GITHUB_OUTPUT"
+          echo "bump_count=${bump_count}" >> "$GITHUB_OUTPUT"
+
+      - name: Create single bump commit
+        id: commit
+        if: steps.bump.outputs.bump_count != '' && steps.bump.outputs.bump_count != '0'
+        env:
+          BUMPS_FILE: ${{ steps.bump.outputs.bumps_file }}
+        run: |
+          set -euo pipefail
+          git commit \
+            -m "release: bump skill versions [skip ci]" \
+            -m "$(cat "$BUMPS_FILE")" \
+            -m "Auto-generated by .github/workflows/version-bump.yml."
+
+      - name: Push bump commit
+        if: steps.bump.outputs.bump_count != '' && steps.bump.outputs.bump_count != '0'
+        run: |
+          set -euo pipefail
+          attempts=0
+          max_attempts=3
+          while true; do
+            attempts=$((attempts + 1))
+            if git push origin HEAD:main; then
+              break
+            fi
+            if [ "$attempts" -ge "$max_attempts" ]; then
+              exit 1
+            fi
+            git fetch origin main
+            git pull --rebase origin main || git rebase --abort 2>/dev/null || true
+          done
+
+  dist:
+    needs: [preflight, bump]
+    if: needs.preflight.outputs.has_skip_ci != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish curated plugin payload to plugin-dist
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          stage="${RUNNER_TEMP}/plugin-payload"
+          rm -rf "$stage"
+          mkdir -p "$stage/.claude-plugin" "$stage/agents"
+          cp .claude-plugin/plugin.json "$stage/.claude-plugin/plugin.json"
+          cp agents/chc.md "$stage/agents/chc.md"
+          cp LICENSE "$stage/LICENSE"
+          cp -R skills "$stage/skills"
+
+          worktree="${RUNNER_TEMP}/plugin-dist-wt"
+          rm -rf "$worktree"
+          if git ls-remote --exit-code --heads origin plugin-dist >/dev/null 2>&1; then
+            git fetch origin plugin-dist:plugin-dist
+            git worktree add "$worktree" plugin-dist
+          else
+            git worktree add --detach "$worktree"
+            git -C "$worktree" checkout --orphan plugin-dist
+          fi
+
+          stamp_version() {
+            python3 -c '
+          import json, sys
+          path, version = sys.argv[1], sys.argv[2]
+          if not version:
+              sys.exit(0)
+          with open(path) as fh:
+              manifest = json.load(fh)
+          manifest["version"] = version
+          with open(path, "w") as fh:
+              fh.write(json.dumps(manifest, indent=2) + "\n")
+          ' "$1" "$2"
+          }
+
+          published=""
+          manifest="$worktree/.claude-plugin/plugin.json"
+          if [ -f "$manifest" ]; then
+            published="$(python3 -c '
+          import json, sys
+          with open(sys.argv[1]) as fh:
+              m = json.load(fh)
+          print(m.get("version") or "")
+          ' "$manifest")"
+          fi
+
+          next_version="$(python3 -c '
+          import datetime, sys
+          prev = sys.argv[1].split(".")
+          now = datetime.datetime.now(datetime.timezone.utc)
+          today = (now.year, now.month * 100 + now.day)
+          if len(prev) == 3 and all(part.isdigit() for part in prev):
+              year, mmdd, counter = (int(part) for part in prev)
+              if (year, mmdd) >= today:
+                  print(f"{year}.{mmdd}.{counter + 1}")
+                  sys.exit(0)
+          print(f"{today[0]}.{today[1]}.0")
+          ' "$published")"
+
+          stamp_version "$stage/.claude-plugin/plugin.json" "$published"
+
+          cd "$worktree"
+          git rm -rfq . >/dev/null 2>&1 || true
+          cp -R "$stage"/. .
+          git add -A
+          if git diff --cached --quiet; then
+            echo "plugin-dist already current; nothing to publish."
+            exit 0
+          fi
+
+          stamp_version .claude-plugin/plugin.json "$next_version"
+          git add -A
+          git commit -m "release: publish plugin ${next_version} from ${GITHUB_SHA}"
+          git push origin plugin-dist

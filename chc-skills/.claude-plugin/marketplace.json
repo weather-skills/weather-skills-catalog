@@ -1,0 +1,18 @@
+{
+  "name": "chc-skills",
+  "description": "Climate Hazards Center data skills for SubC forecasts and Indian Ocean Dipole analysis.",
+  "owner": {
+    "name": "rhiza-research"
+  },
+  "plugins": [
+    {
+      "name": "rhiza-chc",
+      "source": {
+        "source": "github",
+        "repo": "rhiza-research/chc-skills",
+        "ref": "plugin-dist"
+      },
+      "description": "Climate Hazards Center data skills for SubC forecasts and Indian Ocean Dipole analysis."
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling", "skills-runner"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chc-skills"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dynamic = ["dependencies", "scripts"]
+
+[tool.hatch.metadata.hooks.skills-runner]
+cli = "chc-skills"
+
+[tool.hatch.build.hooks.skills-runner]
+
+[dependency-groups]
+dev = [
+    "pytest>=9",
+    "numpy",
+    "xarray",
+    "zarr",
+    "cftime",
+    "netcdf4",
+    "weather-skills-core",
+    "fsspec",
+    "aiohttp",
+]
+
+[tool.uv.sources]
+skills-runner = { git = "https://github.com/tescalada/skills-runner" }
+weather-skills-core = { git = "https://github.com/rhiza-research/weather-skills-core", branch = "main" }
+
+[tool.pytest.ini_options]
+testpaths = ["skills"]
+python_files = ["test_*.py"]
+pythonpath = ["tests"]
+filterwarnings = [
+    "ignore:Consolidated metadata is currently not part in the Zarr format 3 specification",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+extend-select = ["I", "B", "UP"]

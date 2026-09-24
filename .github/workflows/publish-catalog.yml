@@ -1,0 +1,32 @@
+name: Publish catalog
+
+# Merges to catalog arrive as pushes. Expand each submodule into a normal
+# folder and fast-forward main to that tree.
+
+on:
+  push:
+    branches: [catalog]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-catalog-to-main
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+
+      - name: Expand submodules and push main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/publish-to-main.sh

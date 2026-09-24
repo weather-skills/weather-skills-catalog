@@ -1,0 +1,89 @@
+name: Skill lint (advisory)
+
+on:
+  pull_request:
+    paths:
+      - "skills/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: skill-lint-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  skill-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v8.1.0
+      - name: Lint changed skills and update the sticky comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          CORE: git+https://github.com/rhiza-research/weather-skills-core@main
+        run: |
+          set -euo pipefail
+          marker='<!-- skill-lint-advisory -->'
+
+          mapfile -t changed < <(
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- 'skills/*/**' \
+              | cut -d/ -f1-2 | sort -u \
+              | while read -r d; do [ -d "$d" ] && echo "$d"; done
+          )
+          if [ "${#changed[@]}" -eq 0 ]; then
+            echo "No changed skills in this PR; nothing to lint."
+            exit 0
+          fi
+          printf 'Changed skills:\n'; printf '  %s\n' "${changed[@]}"
+
+          if ! uvx --from "$CORE" weather-skills-core lint skills/ --format json > report.json; then
+            echo "Linter did not complete; advisory step passing without a comment."
+            exit 0
+          fi
+
+          names_json=$(printf '%s\n' "${changed[@]}" | sed 's#^skills/##' \
+            | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          findings=$(jq -c --argjson names "$names_json" '
+            ($names | join("|")) as $alt
+            | [ .findings[] | select(.file | test("(^|/)skills/(" + $alt + ")/")) ]
+          ' report.json)
+          count=$(jq 'length' <<<"$findings")
+          echo "Findings for changed skills: $count"
+
+          if [ "$count" -eq 0 ]; then
+            echo "No findings for the changed skills; leaving the PR untouched."
+            exit 0
+          fi
+
+          {
+            echo "$marker"
+            echo "### Skill conformance (advisory)"
+            echo
+            echo "The \`weather-skills-core\` linter flagged the changed skill(s). This is advisory and does not block merge."
+            echo
+            jq -r '
+              group_by(.skill)[]
+              | "**\(.[0].skill)**",
+                (.[] | "- `\(.rule)` \(.severity)\(if .flag then " [`\(.flag)`]" else "" end): \(.message)"),
+                ""
+            ' <<<"$findings"
+          } > body.md
+
+          existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq "first(.[] | select(.body | startswith(\"$marker\")) | .id) // empty")
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$existing" -F body=@body.md
+            echo "Updated sticky comment $existing"
+          else
+            gh api --method POST "repos/$REPO/issues/$PR/comments" -F body=@body.md
+            echo "Created sticky comment"
+          fi
