@@ -1,54 +1,53 @@
-# Weather skills catalog
+# Weather skills
 
-Weather skills turn scientific weather-data pipelines into fixed, reviewable tools for agentic AI. An assistant fetches a forecast or an observation, clips it, aggregates it, and plots it by running checked-in skills in order. Each output file carries provenance — the skill, version, and arguments that produced it — so someone else can rerun or audit the chain. Skills are plain Python scripts. They run in any environment with a code-execution runtime and [uv](https://docs.astral.sh/uv/), and they read and write [CF-compliant](https://cfconventions.org/) Zarr, so one skill's output is the next skill's input.
+An AI-ready library for weather and climate data.
 
-This repository is that catalog. `main` is the canonical tree consumers install, with each skill at `skills/<provider>/<name>/`. The [`catalog`](https://github.com/weather-skills/weather-skills-catalog/tree/catalog) branch records each skill repository as a git submodule. Merging to `catalog` publishes those skills on `main`.
+Use natural language to fetch, transform, and visualize weather data — with provenance you can audit.
 
-Early stage: interfaces, the standard dataset, and skill boundaries may change.
+Weather skills are composable tools that allow AI agents to support operational forecasting, scientific exploration of climate data, and the use of forecasts and weather data for specific applications. Each weather skill is expert-reviewed, and the results are backed by provenance, so AI helps you call the right tools and does not modify the underlying data. Initiated by Rhiza Research; a community effort will steward the catalog.
 
-## Using the skills
+A pipeline fetches forecasts and observations, transforms them (clip, aggregate, convert), and visualizes maps and time series. Provenance is recorded at every step. From a natural-language request, the agent picks skills and runs them in order.
 
-Install agent skills from `main` of [weather-skills/weather-skills-catalog](https://github.com/weather-skills/weather-skills-catalog). Each skill is `skills/<provider>/<name>/`, for example `skills/weather-skills/clip-region`. The command-line tools stay in the provider repositories.
+We are looking for beta testers. If you want to use weather skills for your application, write to [info@rhizaresearch.org](mailto:info@rhizaresearch.org).
 
-### Command line
+## Getting started
 
-For ad-hoc use, with no agent, each provider repository is a CLI. `uvx` runs it without a permanent install:
+Skills are simple Python scripts with descriptions that assist AI agents in calling those scripts. Run them in your terminal, add them to an agent, reach them through MCP, or use the hosted chat.
+
+### As a CLI tool
+
+For command-line use, with no install:
 
 ```bash
-# List the Rhiza weather skills
-uvx --from git+https://github.com/rhiza-research/weather-skills weather-skills
+# List available skills
+uvx --from git+https://github.com/weather-skills/weather-skills-catalog weather-skills
 
 # Run one
-uvx --from git+https://github.com/rhiza-research/weather-skills weather-skills <skill> [args]
-
-# Climate Hazards Center skills
-uvx --from git+https://github.com/rhiza-research/chc-skills chc-skills
+uvx --from git+https://github.com/weather-skills/weather-skills-catalog weather-skills <skill> [args]
 ```
 
-Or install a provider once and invoke it directly:
+### As agent skills
+
+For use by a local agent, install the `SKILL.md` files into your project with [skillkit](https://github.com/rohitg00/skillkit):
 
 ```bash
-uv tool install git+https://github.com/rhiza-research/weather-skills
-weather-skills                              # list
-weather-skills <skill> [args]               # run one
-```
-
-Each skill's inline dependency block is resolved by `uv run` on that invocation.
-
-### Agent skills
-
-For an LLM agent, install the `SKILL.md` files with [skillkit](https://github.com/rohitg00/skillkit). `npx` runs the latest skillkit on demand:
-
-```bash
-# List what skillkit discovers in the catalog
+# List what skillkit discovers in the repo
 npx skillkit install weather-skills/weather-skills-catalog --list
 
-# Install every skill into the current project
+# Install all skills to the current project
 npx skillkit install weather-skills/weather-skills-catalog --all --yes
 
-# Install one skill
+# Install just a subset
 npx skillkit install weather-skills/weather-skills-catalog --skill=ecmwf-fetch
 ```
+
+### As an MCP
+
+A hosted MCP will be coming soon.
+
+### Weather Skills Chat
+
+We are rolling out a hosted version of weather skills. [Request access](https://chat.weather-skills.org) if you are interested in being a beta tester.
 
 ## Building a skill
 
@@ -70,7 +69,7 @@ def clip_region(ds, output, bbox, **kwargs):
     return ds
 ```
 
-The authoring guide — declaration, dimensions, units, and CLI flag names — is [`weather-skill-authoring`](https://github.com/rhiza-research/weather-skills-core/blob/main/skills/weather-skill-authoring/SKILL.md). The dataset contract is [`STANDARD_DATASET.md`](https://github.com/rhiza-research/weather-skills-core/blob/main/skills/weather-skill-authoring/references/STANDARD_DATASET.md).
+The authoring guide — declaration, dimensions, units, and CLI flag names — is [`weather-skill-authoring`](https://github.com/rhiza-research/weather-skills-core/blob/main/docs/weather-skill-authoring/SKILL.md). The dataset contract is [`STANDARD_DATASET.md`](https://github.com/rhiza-research/weather-skills-core/blob/main/docs/weather-skill-authoring/references/STANDARD_DATASET.md).
 
 ## Contributing
 
