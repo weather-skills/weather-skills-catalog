@@ -57,21 +57,19 @@ trap cleanup EXIT
 git worktree add --detach "$work" origin/main
 find "$work" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
 
-# .git files inside submodule checkouts must not be copied, or git would
-# record those directories as gitlinks instead of trees.
-rsync -a \
-  --exclude '.git' \
-  --exclude '.gitmodules' \
-  "$repo_root/" "$work/"
+# Publish the catalog files only. Submodule checkouts stay on the catalog
+# branch; main receives each skill at skills/<provider>/<name>/.
+rsync_excludes=(--exclude '.git' --exclude '.gitmodules')
+for path in "${paths[@]}"; do
+  rsync_excludes+=(--exclude "$path")
+done
+rsync -a "${rsync_excludes[@]}" "$repo_root/" "$work/"
 
-# skillkit sparse-checkouts root paths such as skills/ and then walks that
-# tree. Provider repos keep their own skills/<name>/ for the CLI; copy each
-# skill to skills/<provider>/<name>/ so the sparse checkout contains it.
 mkdir -p "$work/skills"
 shopt -s nullglob
 for path in "${paths[@]}"; do
   provider=$(basename "$path")
-  for skill_dir in "$work/$path"/skills/*/; do
+  for skill_dir in "$repo_root/$path"/skills/*/; do
     if [[ ! -f "${skill_dir}SKILL.md" ]]; then
       continue
     fi
