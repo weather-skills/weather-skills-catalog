@@ -51,10 +51,10 @@ We are rolling out a hosted version of weather skills. [Request access](https://
 
 ## Building a skill
 
-Write the work in ordinary Python and depend on the [`weather-skills-core`](https://github.com/rhiza-research/weather-skills-core) package. `@weather_skill` turns a function into a CLI and an agent skill: it parses the shared flags, checks the standard-dataset contract, and stamps provenance on the output.
+Write the work in ordinary Python and depend on the [`weather-skills-core`](https://github.com/weather-skills/weather-skills-core) package. `@weather_skill` turns a function into a CLI and an agent skill: it parses the shared flags, checks the standard-dataset contract, and stamps provenance on the output.
 
 ```bash
-uv add "weather-skills-core @ git+https://github.com/rhiza-research/weather-skills-core"
+uv add "weather-skills-core @ git+https://github.com/weather-skills/weather-skills-core"
 ```
 
 A skill is a directory `skills/<name>/` with a `SKILL.md` and a script. The script declares inputs and returns a dataset or a figure; the decorator owns `--output`.
@@ -69,7 +69,7 @@ def clip_region(ds, output, bbox, **kwargs):
     return ds
 ```
 
-The authoring guide — declaration, dimensions, units, and CLI flag names — is [`weather-skill-authoring`](https://github.com/rhiza-research/weather-skills-core/blob/main/docs/weather-skill-authoring/SKILL.md). The dataset contract is [`STANDARD_DATASET.md`](https://github.com/rhiza-research/weather-skills-core/blob/main/docs/weather-skill-authoring/references/STANDARD_DATASET.md).
+The authoring guide — declaration, dimensions, units, and CLI flag names — is [`weather-skill-authoring`](https://github.com/weather-skills/weather-skills-core/blob/main/docs/weather-skill-authoring/SKILL.md). The dataset contract is [`STANDARD_DATASET.md`](https://github.com/weather-skills/weather-skills-core/blob/main/docs/weather-skill-authoring/references/STANDARD_DATASET.md).
 
 ## Contributing
 
