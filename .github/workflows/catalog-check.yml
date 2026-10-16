@@ -25,5 +25,5 @@ jobs:
 
       - name: Check out submodules and lint skills
         env:
-          CORE: git+https://github.com/weather-skills/weather-skills-core@main
+          CORE: weather-skills-core>=0.1.1
         run: bash .github/scripts/check-catalog.sh
