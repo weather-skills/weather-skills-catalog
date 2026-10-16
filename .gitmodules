@@ -6,3 +6,7 @@
 	path = chc-skills
 	url = https://github.com/rhiza-research/chc-skills.git
 	branch = main
+[submodule "weather-skills-plotting"]
+	path = weather-skills-plotting
+	url = https://github.com/rhiza-research/weather-skills-plotting.git
+	branch = main
