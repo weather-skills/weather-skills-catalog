@@ -68,11 +68,18 @@ if ! git -C "$work" merge-base --is-ancestor "$catalog_sha" HEAD; then
     -c user.name='github-actions[bot]' \
     -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
     merge -X ours --no-commit --no-ff "$catalog_sha" 2>"$merge_err"; then
-    echo "error: merging catalog into main failed." >&2
-    cat "$merge_err" >&2
-    git -C "$work" diff --name-only --diff-filter=U >&2 || true
-    rm -f "$merge_err"
-    exit 1
+    # -X ours does not settle modify/delete. main deletes .gitmodules and the
+    # submodule paths, and skills/ is rewritten, so conflicts there are dropped below.
+    other=$(git -C "$work" diff --name-only --diff-filter=U \
+      | grep -vxF -f <(printf '%s\n' .gitmodules "${paths[@]}") \
+      | grep -v '^skills/' || true)
+    if [[ -n "$other" ]] || ! git -C "$work" rev-parse -q --verify MERGE_HEAD >/dev/null; then
+      echo "error: merging catalog into main failed." >&2
+      cat "$merge_err" >&2
+      printf '%s\n' "$other" >&2
+      rm -f "$merge_err"
+      exit 1
+    fi
   fi
   rm -f "$merge_err"
   git -C "$work" rm -f --cached --ignore-unmatch -- .gitmodules
