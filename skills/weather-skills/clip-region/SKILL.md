@@ -1,71 +1,47 @@
 ---
 name: clip-region
-description: "Spatially subset a weather-skills standard dataset Zarr to a lat/lon bbox or GeoJSON polygon. Use when you need to restrict any dataset (forecast, satellite, reanalysis, stations) before downstream aggregation or plotting. Named places: get a bbox (or polygon) from the resolve-region skill first."
+description: "Clip a gridded or station Zarr to a lat/lon box, a named region (country, province or county, multi-country region), or a GeoJSON polygon. Use to restrict any dataset to an area of interest."
 license: MIT
 compatibility: Requires Python 3.12 and uv.
 allowed-tools: Bash(uv run ${CLAUDE_SKILL_DIR}/scripts/clip.py *)
 metadata:
+  version: "0.0.3"
   catalog-group: transforms
 ---
 
 # clip-region
 
-Source-agnostic spatial subset. Pass an explicit `--bbox` or a `--geojson`
-polygon. For a named country or county, run the `resolve-region` skill first
-and pass its printed bbox (or the GeoJSON file it writes).
-
-## When to use
-
-- Narrowing a continental grid down to one country for plotting or per-country reporting.
-- Clipping a gridded or station dataset to a custom polygon.
-- Applying a custom bbox to any gridded dataset before further processing.
+Keeps the part of a gridded or station dataset inside a box or polygon.
 
 ## Usage
 
-```
-uv run ${CLAUDE_SKILL_DIR}/scripts/clip.py --input <in.zarr> --output <out.zarr> \
-    --bbox N/W/S/E
-
-uv run ${CLAUDE_SKILL_DIR}/scripts/clip.py --input <in.zarr> --output <out.zarr> \
-    --geojson boundary.geojson [--keep-outside]
+```bash
+uv run ${CLAUDE_SKILL_DIR}/scripts/clip.py -i IN.zarr -o OUT.zarr (--bbox N/W/S/E | --region NAME | --geojson FILE) [--keep-outside]
 ```
 
 ### Arguments
-- `--input`, `-i` — input Zarr (gridded/spatial or point_obs).
+- `--input`, `-i` — input Zarr, gridded or point_obs.
 - `--output`, `-o` — output Zarr.
-- `--bbox` — `N/W/S/E` in decimal degrees. Mutex with `--geojson`. Named
-  places: compose with the `resolve-region` skill and pass the printed value.
-- `--geojson` — path to a GeoJSON Feature/FeatureCollection/geometry. Mutex
-  with `--bbox`. For a country or county polygon, write it with
-  `resolve-region --geojson`.
-- `--keep-outside` — with `--geojson` only: set values outside the polygon to NaN instead of dropping cells/stations.
+- `--bbox` — `N/W/S/E` decimal degrees. Keeps cells whose centre is inside. West > east crosses the antimeridian.
+- `--region` — ISO3 (`KEN`), country name, Natural Earth region (`East Africa`), custom box (`Indian Ocean`), or `country-admin1` (`Kenya-Turkana`). Offline lookup only.
+- `--geojson` — GeoJSON Feature, FeatureCollection (unioned), or bare geometry.
+- `--keep-outside` — with `--region` / `--geojson`: keep the full grid or station list and set values outside the polygon to NaN.
 
-### Longitude convention
-
-Longitudes in `[0, 360]` are auto-wrapped to `[-180, 180]` before clipping, so a global grid stored in the `[0, 360]` convention still intersects bboxes/polygons that use negative lon.
+Pass exactly one of `--bbox`, `--region`, `--geojson`.
 
 ### Output
+The input subset in space. With `--region` / `--geojson`:
+- Grids keep every cell that overlaps the polygon by positive area, at full value (no area weighting), trimmed to the polygon's extent; other cells in that extent are NaN.
+- Stations keep those whose point lies inside the polygon.
 
-A spatial subset of the input Zarr with provenance history stamped.
+### Notes
+- Grids stored in `[0, 360]` longitude are wrapped to `[-180, 180)`; the output keeps the wrapped longitudes.
+- Masked integer variables become float. Variables off the grid or station axis pass through unchanged.
+- An empty selection exits 1.
+- Multi-country regions use coarse 1:110m outlines. Pass a detailed `--geojson` when edge cells matter.
 
-### Provenance
-
-The output stamps a JSON-encoded `weather_skills_history` attr: an append-only array
-of per-step entries `{skill, version, args, input}`. This skill reads the
-upstream input's `weather_skills_history` (default `[]` and stderr warning if absent)
-and appends its own entry. `args` is the argparse namespace minus the
-`--input`/`--output` path strings; `input` is a `{basename, hash}` dict —
-`basename` is the upstream zarr's filename and `hash` is a sha256 of its
-stored bytes; `version` is the `_SKILL_VERSION` constant in `scripts/clip.py`.
-
-The `args` dict stores argparse dest names (underscored), not the hyphenated CLI
-flag names. A consumer reconstructing a
-`uv run ${CLAUDE_SKILL_DIR}/scripts/<skill>.py <args>` invocation must
-translate underscore → hyphen.
-
-## Example
-
+### Example
 ```bash
-# Named places: run resolve-region first, then pass the printed N/W/S/E:
-uv run ${CLAUDE_SKILL_DIR}/scripts/clip.py -i /tmp/ecmwf.zarr -o /tmp/ecmwf_kenya.zarr --bbox 5/34/-5/42
+uv run ${CLAUDE_SKILL_DIR}/scripts/clip.py -i chirps_eastafrica.zarr -o chirps_kenya.zarr --region Kenya
 ```
+Writes CHIRPS cells that touch Kenya; cells outside the border but inside its extent are NaN.

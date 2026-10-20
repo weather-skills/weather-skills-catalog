@@ -1,68 +1,46 @@
 ---
 name: concat
-description: Concatenate two or more weather-skills standard dataset Zarr stores along a named dimension, optionally assigning coordinate values to the new axis. Use when combining ensemble members, stitching time windows, or merging per-country fetches into a single dataset.
+description: "Join two or more weather-skills Zarrs into one along a named dimension, either extending an existing dim (consecutive time windows, ensemble halves, adjacent boxes) or stacking them along a new dim with optional labels (e.g. one entry per model). Use when combining ensemble members, stitching time windows, or putting several models side by side in one dataset."
 license: MIT
 compatibility: Requires Python 3.12 and uv.
 allowed-tools: Bash(uv run ${CLAUDE_SKILL_DIR}/scripts/concat.py *)
 metadata:
+  version: "0.0.4"
   catalog-group: transforms
 ---
 
 # concat
 
-Source-agnostic concatenation along a named dim. Inputs must share all other dims and variables. If the concat dim does not exist on the inputs, a new dim is created (use `--coords` to assign values).
-
-## When to use
-
-- Stitching per-country or per-date fetches into one Zarr.
-- Joining two ensemble halves (cf and pf) along `number`.
-- Glueing back two time windows after parallel processing.
+Concatenates datasets along one dim, creating the dim when the inputs lack it.
 
 ## Usage
 
-```
-uv run ${CLAUDE_SKILL_DIR}/scripts/concat.py -i a.zarr -i b.zarr [-i ...] --dim DIM --output <out.zarr> \
-    [--coords V1,V2,...]
+```bash
+uv run ${CLAUDE_SKILL_DIR}/scripts/concat.py -i A.zarr -i B.zarr [-i ...] --dim DIM -o OUT.zarr [--coords V1,V2,...]
 ```
 
 ### Arguments
-- `--input`, `-i` — input Zarr (pass once per input; order is preserved). At least two are required.
-- `--dim` — dimension name to concatenate along.
-- `--coords` — optional comma-separated coord values to assign to the new dim. Length must match number of inputs; only used when `--dim` does not already exist on inputs.
+- `--input`, `-i` — input Zarr; repeat once per input, at least two. Order is kept.
+- `--dim` — dim to concatenate along. If no input has it, a new dim is created.
+- `--coords` — new dim only: comma-separated labels, one per input. Each parses as int, float, ISO date (`2026-10-01`), else text. Default: no labels.
 - `--output`, `-o` — output Zarr.
 
-### Input units
-
-Concatenation combines the inputs into one array that carries a single `units`
-label (the first input's attrs are preserved on the output). For each data
-variable common to every input, the `units` attr is compared across the inputs
-before any output is written. When two inputs carry the variable in differing
-units, the skill exits with status 2 and names each input and its units; no
-output is produced. Inputs that omit `units` for a variable are not treated as a
-violation — only present values are compared.
-
 ### Output
+One dataset with `--dim` extended, sorted ascending when the inputs came out of order. Each variable is in the first input's units; later inputs in compatible units are converted (`mm hr-1` → `mm day-1`). Attrs come from the first input.
 
-A single Zarr with the concat dim extended. Attrs from the first input are preserved.
+### Notes
+- Every other coordinate must match exactly: same grid, same times, same stations. Put inputs on one grid and window first.
+- These exit 2 with no output:
+  - a label repeated along an existing dim (overlapping windows such as Oct 1–7 and Oct 5–10);
+  - `--dim` on some inputs but not others, or `--coords` with a dim that already exists;
+  - inputs with different variables, or a variable whose `data_interval` or `aggregation_period` differs between inputs;
+  - incompatible units (`K` against `mm day-1`);
+  - dates on different calendars (standard against `noleap`; use convert-calendar);
+  - a stitched `latitude` / `longitude` that is not evenly spaced (a gap between boxes, or different grids).
+- Scalar coordinates (the `time` or `step` that select keeps) that differ between inputs become a coordinate along `--dim`; one only some inputs carry is dropped. So single-time inputs stacked along `--dim time` keep their dates; inputs with no time label have none unless you pass them with `--coords`.
 
-### Provenance
-
-The output stamps a JSON-encoded `weather_skills_history` attr: an append-only array of
-per-step entries `{skill, version, args, input}`. Because concat takes multiple
-inputs, its entry's `input` field is a list of `{basename, hash, history}` dicts
-(one per input, in the order given on the command line). Each item's `history`
-holds that input's full `weather_skills_history` chain (an empty list when the input had
-no `weather_skills_history`), so the concat entry records every input branch and the
-output is fully reproducible from its own provenance. The output's top-level
-`weather_skills_history` is a single linear array: the first input's chain followed by
-this concat entry, matching the attr passthrough already done on the dataset.
-`args` is the argparse namespace minus the `--input`/`--output` path strings;
-`version` is the `_SKILL_VERSION` constant in `scripts/concat.py`. Each input's `hash` is a sha256 over its stored bytes, so
-renamed-but-unchanged inputs still match and same-named-but-modified inputs
-do not.
-
-## Example
-
+### Example
 ```bash
-uv run ${CLAUDE_SKILL_DIR}/scripts/concat.py -i /tmp/cf.zarr -i /tmp/pf.zarr --dim number --output /tmp/ens.zarr
+uv run ${CLAUDE_SKILL_DIR}/scripts/concat.py -i ecmwf_w2_kenya.zarr -i gefs_w2_kenya.zarr --dim model --coords ecmwf,gefs -o models_w2_kenya.zarr
 ```
+Writes week-2 precip from both models on one grid, stacked along a new `model` dim labelled `ecmwf`, `gefs`.

@@ -1,110 +1,42 @@
 ---
 name: convert-calendar
-description: Convert a weather-skills standard dataset Zarr's time axis to a target CF calendar by wrapping xarray's Dataset.convert_calendar. Use to align two datasets onto a common calendar before comparison — e.g. converting a model-calendar forecast (noleap/360_day) to the standard calendar of observations. Converting to a standard calendar yields a datetime64 axis; converting to a model calendar yields a cftime axis. Dates not representable in the target calendar are dropped.
+description: "Convert a weather-skills Zarr's time axis to another CF calendar: the standard calendar of observations, or a climate-model calendar such as noleap (no Feb 29) or 360_day (twelve 30-day months). Use to put two datasets on one calendar before comparing them, e.g. a noleap model run against standard-calendar observations."
 license: MIT
 compatibility: Requires Python 3.12 and uv.
 allowed-tools: Bash(uv run ${CLAUDE_SKILL_DIR}/scripts/convert_calendar.py *)
 metadata:
+  version: "0.0.3"
   catalog-group: transforms
 ---
 
 # convert-calendar
 
-Convert the time axis of a weather-skills standard dataset Zarr to a target CF calendar. CF
-datasets may use different calendars — the standard (proleptic Gregorian)
-calendar of observations, or a model calendar such as `noleap` (no Feb 29) or
-`360_day` (twelve 30-day months). The same wall-clock date maps to a different
-day-count per calendar, and some dates don't exist across calendars, so two
-datasets on different calendars cannot be compared directly. This skill wraps
-xarray's `Dataset.convert_calendar` to put a dataset on a chosen calendar so it
-can be aligned with another before comparison. It reads any valid CF input
-(including a non-standard model calendar) and emits valid CF.
-
-Converting **to a standard calendar** (`standard`, `proleptic_gregorian`) yields
-a `datetime64` time axis. Converting **to a model calendar** (`noleap`,
-`360_day`, `all_leap`, `julian`, ...) yields an object-dtype `cftime` axis.
-
-`--align-on` is **required** whenever the source or target calendar is
-`360_day`. Dates not representable in the target calendar (e.g. Feb 29 when
-converting to `noleap`) are **dropped** from the output.
-
-## When to use
-
-- Aligning a model-calendar forecast (`noleap`/`360_day`) to the standard
-  calendar of an observation dataset so the two can be compared.
-- Putting two datasets on a common CF calendar before any calendar-sensitive
-  step.
-
-Not for: resampling or rolling up the time axis into fixed windows (daily,
-weekly, monthly) — that is `aggregate-temporal`. Not for comparing or plotting
-two datasets — that is `plot-compare`. This skill changes only the calendar of
-the time axis; it does not resample, reduce, or render.
+Re-expresses the dates on the time axis in a target calendar, using xarray's `Dataset.convert_calendar`.
 
 ## Usage
 
-```
-uv run ${CLAUDE_SKILL_DIR}/scripts/convert_calendar.py --input <in.zarr> --output <out.zarr> \
-    --calendar NAME \
-    [--time-dim NAME] [--align-on date|year]
+```bash
+uv run ${CLAUDE_SKILL_DIR}/scripts/convert_calendar.py -i IN.zarr -o OUT.zarr --calendar NAME [--align-on date|year] [--time-dim NAME]
 ```
 
 ### Arguments
-- `--input`, `-i` — input Zarr (any standard dataset with a wall-clock `time` axis).
+- `--input`, `-i` — input Zarr with a time axis of dates.
 - `--output`, `-o` — output Zarr.
-- `--calendar` — target CF calendar name (`standard`, `proleptic_gregorian`,
-  `noleap`, `360_day`, `all_leap`, `julian`, ...).
-- `--time-dim` — name of the time dim when it is not auto-detectable via CF
-  metadata. Defaults to the CF "T" axis (cf-xarray).
-- `--align-on` — `date` or `year`. **Required** when the source or target
-  calendar is `360_day`. `year` translates dates by relative position in the
-  year (best for daily/sub-daily data); `date` conserves month/day and drops
-  invalid dates (best for coarser-than-daily data). Omitted for conversions not
-  involving `360_day`.
+- `--calendar` — target: `standard`, `gregorian`, `proleptic_gregorian`, `noleap`, `365_day`, `360_day`, `all_leap`, `366_day`, or `julian`.
+- `--align-on` — how to map dates when the source or target is `360_day` (required then, ignored otherwise):
+  - `date` keeps month and day and drops dates that do not exist (Feb 29/30, the 31st). Suits data coarser than daily.
+  - `year` maps by position in the year. To `360_day` it drops 5–6 days a year; from `360_day` it leaves 5–6 days a year with no sample. Suits daily or sub-daily data.
+- `--time-dim` — the time dim. Default: the CF `T` axis, else the dim named `time`.
 
 ### Output
+The same variables, dims, coords, and attrs, with the time axis in the target calendar: `datetime64` for `standard`, `gregorian`, and `proleptic_gregorian`, `cftime` objects for the others. CF time bounds (named by the time coord's `bounds` attr) move with their labels and keep each cell's width.
 
-Same variables, dims, and coords as the input, with the time axis re-expressed
-on the target calendar. Converting to a standard calendar gives a
-`datetime64` axis; converting to a model calendar gives a `cftime` axis. Dates
-not representable in the target calendar are dropped (so the time axis may be
-shorter than the input's). CF coordinate and data-variable attributes are
-preserved.
+### Notes
+- Dates that do not exist in the target calendar (Feb 29 going to `noleap`) are dropped and listed on stderr; nothing is filled in. If every date would be dropped, it exits 2.
+- The time axis must hold dates. A forecast whose only time axis is the `step` lead exits 2; give it valid times first.
 
-### Provenance
-
-The output stamps a JSON-encoded `weather_skills_history` attr: an append-only array of
-per-step entries `{skill, version, args, input}`. This skill reads the upstream
-input's `weather_skills_history` (default `[]` and a stderr warning if absent) and
-appends its own entry. `args` is the argparse namespace minus the
-`--input`/`--output` path strings (so `calendar`, `time_dim`, `align_on`);
-`input` is a `{basename, hash}` dict — `basename` is the upstream zarr's
-filename and `hash` is a sha256 of its stored bytes; `version` is the
-`_SKILL_VERSION` constant in `scripts/convert_calendar.py`. Cache-hit comparison reads the existing output's `weather_skills_history`: a
-hit requires the upstream chain to match and the last entry's `skill`,
-`version`, `args`, and `input.basename` to match the proposed new entry; on a
-hit the script returns without recomputing. The `input.hash` is not part of the
-cache key, so a same-named input whose content changed in place still hits on
-basename.
-
-The `args` dict stores argparse dest names (underscored, e.g. `time_dim`,
-`align_on`), not the hyphenated CLI flag names (`--time-dim`, `--align-on`). A
-consumer reconstructing a `uv run ${CLAUDE_SKILL_DIR}/scripts/<skill>.py <args>`
-invocation must translate underscore → hyphen.
-
-## Examples
-
+### Example
 ```bash
-# Convert a noleap forecast to the standard calendar so it can be compared
-# against standard-calendar observations.
-uv run ${CLAUDE_SKILL_DIR}/scripts/convert_calendar.py \
-    -i /tmp/forecast_noleap.zarr -o /tmp/forecast_standard.zarr \
-    --calendar standard
+uv run ${CLAUDE_SKILL_DIR}/scripts/convert_calendar.py -i cmip6_tas_kenya.zarr -o cmip6_tas_kenya_std.zarr --calendar standard
 ```
-
-```bash
-# Convert standard-calendar observations onto a 360_day model calendar.
-# --align-on is required because 360_day is involved.
-uv run ${CLAUDE_SKILL_DIR}/scripts/convert_calendar.py \
-    -i /tmp/obs.zarr -o /tmp/obs_360.zarr \
-    --calendar 360_day --align-on year
-```
+Writes the noleap CMIP6 temperature run on a standard `datetime64` axis, ready to line up with ERA5.

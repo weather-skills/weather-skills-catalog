@@ -1,26 +1,26 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core @ git+https://github.com/rhiza-research/weather-skills-core@main",
-#   "cftime>=1.6",
-#   "numpy>=2.4",
+#   "weather-skills-core>=0.1.1",
 # ]
 # ///
-"""Realize forecast step as wall-clock time (time = init + step)."""
+"""Relabel a single-init forecast by valid date: its step axis becomes a time axis of init + step."""
 
 from weather_skills_core import Dataset, UsageError, weather_skill
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.2"
+_SKILL_VERSION = "0.0.3"
 
 
 @weather_skill(
     name="step-to-time",
     version=_SKILL_VERSION,
 )
-@weather_skill.argument("-i", "--input", type=Dataset("forecast"), required=True)
+@weather_skill.argument(
+    "-i", "--input", type=Dataset("init_time, prediction_timedelta"), required=True
+)
 def step_to_time(ds, **kwargs):
-    """Realize forecast step as wall-clock time (time = init + step)."""
+    """Relabel a single-init forecast by valid date: its step axis becomes a time axis of init + step."""
     import cftime
     import numpy as np
 
@@ -28,7 +28,11 @@ def step_to_time(ds, **kwargs):
         raise UsageError("need forecast shape: scalar time coord + step dim")
     init = ds["time"]
     step = ds["step"]
-    init_scalar = init.values.item() if hasattr(init.values, "item") else init.values
+    init_scalar = init.values.item()
+    if not isinstance(init_scalar, cftime.datetime) and np.isnat(init.values):
+        raise UsageError("forecast init (scalar time coord) is missing (NaT)")
+    if not (np.diff(step.values.astype("timedelta64[ns]").astype(np.int64)) > 0).all():
+        raise UsageError("step must be strictly increasing (no duplicates); sort it first")
     if isinstance(init_scalar, cftime.datetime):
         valid = np.array(
             [init_scalar + td.item() for td in step.values.astype("timedelta64[us]")],
@@ -48,12 +52,13 @@ def step_to_time(ds, **kwargs):
     if isinstance(bound_name, str) and bound_name in out:
         pairs = np.asarray(out[bound_name].values)
         if isinstance(init_scalar, cftime.datetime):
-            time_pairs = np.empty(pairs.shape, dtype=object)
-            for i in range(pairs.shape[0]):
-                for j in range(2):
-                    time_pairs[i, j] = (
-                        init_scalar + np.asarray(pairs[i, j]).astype("timedelta64[us]").item()
-                    )
+            time_pairs = np.array(
+                [
+                    [init_scalar + td.item() for td in row]
+                    for row in pairs.astype("timedelta64[us]")
+                ],
+                dtype=object,
+            )
         else:
             time_pairs = (init.values + pairs).astype("datetime64[ns]")
         out = out.drop_vars(bound_name).assign_coords(time_bounds=(("time", "nv"), time_pairs))

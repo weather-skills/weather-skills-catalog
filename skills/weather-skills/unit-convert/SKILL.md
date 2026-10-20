@@ -1,61 +1,48 @@
 ---
 name: unit-convert
-description: Convert data variables in a weather-skills standard dataset to target units (pint / CF), or normalize recognized temp/precip variables to standard display units (degree_Celsius, mm day-1, mm) via --to-standard.
+description: "Convert data variables in a weather-skills Zarr to target units (any UDUNITS / CF string), or put recognized air-temperature, precipitation and pressure variables in the standard units degree_Celsius, mm day-1, mm and hPa. Use to put two datasets on one units basis before comparing or combining them."
 license: MIT
 compatibility: Requires Python 3.12 and uv.
 allowed-tools: Bash(uv run ${CLAUDE_SKILL_DIR}/scripts/unit-convert.py *)
 metadata:
+  version: "0.0.3"
   catalog-group: transforms
 ---
 
 # unit-convert
 
-Converts values with **pint** / **pint-xarray** (CF/UDUNITS strings via
-`cf_xarray.units`). Mass precip (`kg m-2`, `kg m-2 s-1`) converts to depth/rate
-(`mm`, `mm day-1`) by dividing or multiplying by liquid-water density
-(1000 kg m-3).
-
-## When to use
-
-- Put two stores on one units basis before compare/concat/plot.
-- Normalize temp/precip to the weather-skills display standard with `--to-standard`
-  (temp → `degree_Celsius`, precip → `mm day-1`, precip amount → `mm`).
-
-Plots already call `to_standard_units` before rendering; use this skill when you
-need a converted Zarr on disk.
+Converts variable values and their `units` attr with pint, writing a new Zarr.
 
 ## Usage
 
-```
-uv run ${CLAUDE_SKILL_DIR}/scripts/unit-convert.py -i <in.zarr> -o <out.zarr> \
-    --to-units <UNITS> [--variable NAME] [--standard-name NAME]
-
-uv run ${CLAUDE_SKILL_DIR}/scripts/unit-convert.py -i <in.zarr> -o <out.zarr> \
-    --to-standard [--variable NAME]
+```bash
+uv run ${CLAUDE_SKILL_DIR}/scripts/unit-convert.py -i IN.zarr -o OUT.zarr --to-units UNITS [-v NAME] [--standard-name NAME]
+uv run ${CLAUDE_SKILL_DIR}/scripts/unit-convert.py -i IN.zarr -o OUT.zarr --to-standard [-v NAME]
 ```
 
 ### Arguments
+- `--input`, `-i` — input Zarr.
+- `--output`, `-o` — output Zarr.
+- `--to-units` — target units string (`'mm day-1'`, `degC`, `K`). Every selected variable must have units that convert to it. An unknown unit exits 2.
+- `--to-standard` — convert recognized variables (air temperature → `degree_Celsius`, precip rate → `mm day-1`, precip amount → `mm`, sea-level and surface pressure → `hPa`, found by `standard_name` or variable name). Others (SST, wind, unitless) are left as they are and listed on stderr.
+- `--variable`, `-v` — convert only this variable. Default: all variables (`--to-units`) or all recognized ones (`--to-standard`). A name not in the store, or not recognized with `--to-standard`, exits 2.
+- `--standard-name` — CF `standard_name` to write; only with `--to-units`.
 
-- `--to-units` — target UDUNITS/CF units string (mutually exclusive with `--to-standard`).
-- `--to-standard` — convert recognized temp/precip vars to standard display units.
-- `--variable`, `-v` — restrict to a named data var. Omit with `--to-units` only when
-  the store has a single data var; omit with `--to-standard` to convert all recognized
-  temp/precip vars.
-- `--standard-name` — override output CF `standard_name` (only with `--to-units`).
+Pass exactly one of `--to-units`, `--to-standard`.
 
-### Provenance
+### Output
+- Same dims and variables; float32 data stays float32.
+- `units` uses the standard spelling when the target equals one (`mm/day` → `mm day-1`, `degC` → `degree_Celsius`), otherwise the string as given.
+- Precip `standard_name` follows the target: depth rate → `lwe_precipitation_rate`, mass flux → `precipitation_flux`, `mm` / `m` → `lwe_thickness_of_precipitation_amount`, `kg m-2` → `precipitation_amount`.
 
-Appends a `{skill, version, args, input}` entry to `weather_skills_history`
-(see the `provenance` skill).
+### Notes
+- Mass precip (`kg m-2`, `kg m-2 s-1`) converts to depth (`mm`, `mm day-1`) with a water density of 1000 kg m-3.
+- Absolute temperatures take the offset (300 K → 26.85 °C). Temperature differences in `delta_degC` / `delta_degF` stay differences (`--to-standard` writes `delta_degC`); an absolute target such as `degC` exits 2. A difference stored in plain `K` looks absolute, so do not convert it to `degC`.
+- Rate ↔ amount (`mm day-1` ↔ `mm`) exits 2: it needs a time period, which unit conversion does not supply.
 
-## Examples
-
+### Example
 ```bash
-# Flux → daily depth rate
-uv run ${CLAUDE_SKILL_DIR}/scripts/unit-convert.py -i /tmp/gfs.zarr -o /tmp/gfs_mm.zarr \
-    --variable precipitation_surface --to-units 'mm day-1'
-
-# Normalize everything recognized to standard display units
-uv run ${CLAUDE_SKILL_DIR}/scripts/unit-convert.py -i /tmp/raw.zarr -o /tmp/std.zarr \
-    --to-standard
+uv run ${CLAUDE_SKILL_DIR}/scripts/unit-convert.py -i gfs_kenya.zarr -o gfs_kenya_mm.zarr \
+  -v precipitation_surface --to-units 'mm day-1'
 ```
+Writes GFS precipitation over Kenya as a depth rate in `mm day-1` with `standard_name` `lwe_precipitation_rate`.

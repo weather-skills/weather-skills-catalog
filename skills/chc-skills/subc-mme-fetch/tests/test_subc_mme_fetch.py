@@ -49,6 +49,12 @@ def test_url_builder(mod):
     assert url.endswith(
         "/chc-mirror/experimental/SubC/07_day/global/archive/mme_mean_ts_7d_20251201.nc"
     )
+    candidates = mod._candidate_urls(url)
+    assert candidates[0] == url
+    assert candidates[1] == (
+        "https://data.chc.ucsb.edu/experimental/SubC"
+        "/07_day/global/archive/mme_mean_ts_7d_20251201.nc"
+    )
 
 
 def test_normalize_field(mod):
@@ -91,16 +97,22 @@ def test_fetch_one_outlook(mod, monkeypatch, tmp_path):
     )
     ds = xr.open_zarr(out, consolidated=True)
     assert set(ds.data_vars) == {"ts", "ts_anomaly", "pr", "pr_anomaly"}
-    assert list(ds["step"].values) == [np.timedelta64(7, "D")]
+    assert list(ds["step"].values) == [np.timedelta64(0, "D")]
     assert np.issubdtype(ds["step"].dtype, np.timedelta64)
-    assert ds["time"].values == np.datetime64("2025-12-08", "ns")
+    assert ds["time"].values == np.datetime64("2025-12-01", "ns")
     assert ds.attrs["initialization_date"] == "2025-12-01"
     assert ds.attrs["outlook_valid_date"] == "2025-12-08"
     assert ds.attrs["outlook"] == "7d"
     assert float(ds["ts"].mean()) == pytest.approx(7.0)
     assert float(ds["ts_anomaly"].mean()) == pytest.approx(7.1)
-    assert ds["ts_anomaly"].attrs["long_name"] == "SubC MME 7d ts_anomaly"
-    assert "7-day" not in ds["ts_anomaly"].attrs["long_name"]
+    assert ds["ts_anomaly"].attrs["long_name"] == "Surface temperature anomaly"
+    assert ds["ts_anomaly"].attrs["units"] == "delta_degC"
+    assert ds["pr_anomaly"].attrs["long_name"] == "Precipitation anomaly"
+    assert ds["pr"].attrs["long_name"] == "Precipitation"
+    for name in ds.data_vars:
+        assert ds[name].attrs["aggregation_period"] == "7 day"
+    assert ds["pr"].attrs["cell_methods"] == "time: sum"
+    assert ds["ts"].attrs["cell_methods"] == "time: mean"
     assert float(ds["pr"].mean()) == pytest.approx(7.0)
     assert float(ds["pr_anomaly"].mean()) == pytest.approx(7.1)
     assert ds["pr"].attrs["units"] == "mm"
@@ -140,7 +152,66 @@ def test_probe_latest_with_variable(mod, monkeypatch, capsys):
 
     monkeypatch.setattr(mod, "_list_init_dates", fake_list)
     run_skill(mod.fetch, "--outlook", "7d", "--probe-latest", "ts")
-    assert capsys.readouterr().out.strip() == "2025-12-08"
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "2025-12-08"
+    # The 2025-12-08 + 7d window is long over: say so on stderr, keep stdout a bare date.
+    assert "window ended 2025-12-15" in captured.err
+
+
+def test_bbox_keeps_cells_overlapping_the_edge(mod, monkeypatch, tmp_path):
+    # 30-degree fake grid: no cell centre lies inside 5/34/-5/42, but the cell
+    # centred on 30E (15E-45E) overlaps it and must be kept.
+    by_url = {}
+    folder, lead_tag, days = mod.OUTLOOKS["7d"]
+    for kind in ("mean", "anom"):
+        url = mod._url(folder, kind, "pr", lead_tag, date(2025, 12, 1))
+        by_url[url] = _fake_nc(kind=kind, var="pr", fill=1.0, window_days=days)
+    monkeypatch.setattr(mod, "_open_remote", lambda url: by_url[url])
+
+    out = tmp_path / "bbox.zarr"
+    run_skill(
+        mod.fetch,
+        "--date",
+        "2025-12-01",
+        "--outlook",
+        "7d",
+        "-v",
+        "pr",
+        "--bbox",
+        "5/34/-5/42",
+        "-o",
+        str(out),
+    )
+    ds = xr.open_zarr(out, consolidated=True)
+    assert list(ds["longitude"].values) == [30.0]
+    assert list(ds["latitude"].values) == [0.0]
+
+
+def test_bbox_drops_cells_that_only_touch_the_edge(mod, monkeypatch, tmp_path):
+    # The cell centred on 0N spans 15S-15N: it only touches the box's 15N south edge.
+    by_url = {}
+    folder, lead_tag, days = mod.OUTLOOKS["7d"]
+    for kind in ("mean", "anom"):
+        url = mod._url(folder, kind, "pr", lead_tag, date(2025, 12, 1))
+        by_url[url] = _fake_nc(kind=kind, var="pr", fill=1.0, window_days=days)
+    monkeypatch.setattr(mod, "_open_remote", lambda url: by_url[url])
+
+    out = tmp_path / "bbox.zarr"
+    run_skill(
+        mod.fetch,
+        "--date",
+        "2025-12-01",
+        "--outlook",
+        "7d",
+        "-v",
+        "pr",
+        "--bbox",
+        "25/34/15/42",
+        "-o",
+        str(out),
+    )
+    ds = xr.open_zarr(out, consolidated=True)
+    assert list(ds["latitude"].values) == [30.0]
 
 
 def test_probe_latest_all_vars_intersection(mod, monkeypatch, capsys):

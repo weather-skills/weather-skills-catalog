@@ -1,0 +1,14 @@
+{
+  "palettes": {
+    "ppt_total": {"colors": ["#ffffff", "#ffffff", "#c8ffbe", "#78f573", "#1eb41e", "#b4f0fa", "#50a5f5", "#1e6eeb", "#dcdcff", "#a08cff", "#7060dc", "#fffaaa", "#ffa000", "#ff1400", "#a50000", "#e68c8c", "#ffe6e6"], "bounds": [0, 2, 5, 10, 25, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2500]},
+    "ppt_anom_season": {"colors": ["#c00000", "#ff3200", "#ffa000", "#ffe878", "#785046", "#b48c82", "#f0dcd2", "#ffffff", "#c8ffbe", "#78f573", "#1eb41e", "#96d2fa", "#2882f0", "#dcdcff", "#8070eb"], "bounds": [-500, -300, -200, -100, -50, -25, -10, 10, 25, 50, 100, 200, 300, 500]},
+    "ppt_poa": {"colors": ["#e1beb4", "#c00000", "#ff3200", "#ffa000", "#ffe878", "#ffffff", "#c8ffbe", "#78f573", "#1eb41e", "#96d2fa", "#2882f0"], "bounds": [30, 45, 60, 75, 90, 110, 125, 150, 200, 300]},
+    "spi": {"colors": ["#730000", "#e70000", "#ffaa00", "#ffd37b", "#ffff00", "#ffffff", "#bdebff", "#73b2ff", "#0071ff", "#004dad", "#ad00e7"], "bounds": [-2.5, -2.0, -1.5, -1.2, -0.7, -0.5, 0.5, 0.7, 1.2, 1.5, 2.0, 2.5]}
+  },
+  "defaults": {
+    "precip": "ppt_total",
+    "precip_anomaly": "ppt_anom_season",
+    "precip_poa": "ppt_poa",
+    "spi": "spi"
+  }
+}

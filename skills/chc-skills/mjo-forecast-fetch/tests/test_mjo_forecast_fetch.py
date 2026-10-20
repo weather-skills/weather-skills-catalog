@@ -103,3 +103,17 @@ def test_all_page_models_registered(mod):
         "ecmwf-extended-range",
         "bom",
     }
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["--model", "ecmwf"], "ecmwf (bias-corrected)"),
+        (["--model", "ecmwf", "--no-bias-corrected"], "ecmwf (raw)"),
+        (["--model", "jma"], "jma (raw)"),
+    ],
+)
+def test_fetch_reports_variant(mod, monkeypatch, tmp_path, capsys, argv, expected):
+    monkeypatch.setattr(mod, "_download", lambda url, dest: dest.write_bytes(_valid_png_bytes()))
+    run_skill(mod.fetch, *argv, "-o", str(tmp_path / "m.png"))
+    assert expected in capsys.readouterr().err

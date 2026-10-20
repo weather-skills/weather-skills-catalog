@@ -185,31 +185,32 @@ def test_unknown_iso3_does_not_geocode(resolve_region, monkeypatch):
     assert exc.value.code == 1
 
 
-def test_east_africa_prints_ne_subregion_bbox(capsys, resolve_region, monkeypatch):
+def test_east_africa_is_eastern_africa(capsys, resolve_region, monkeypatch):
     def _fail_nominatim(query):
         raise AssertionError(f"Nominatim should not run for East Africa; got {query!r}")
 
     monkeypatch.setattr("weather_skills_core.region._load_nominatim", _fail_nominatim)
 
     run_skill(resolve_region, "East Africa")
-    n, w, s, e = (float(x) for x in capsys.readouterr().out.strip().split("/"))
-    assert s < -20
+    east = capsys.readouterr().out.strip()
+    run_skill(resolve_region, "Eastern Africa")
+    assert capsys.readouterr().out.strip() == east
+    n, w, s, e = (float(x) for x in east.split("/"))
+    assert s < -20  # keeps Madagascar
     assert n > 10
     assert w < 30 < e
-    assert w < 38 < e
 
 
-def test_eastern_africa_matches_east_africa(capsys, resolve_region, monkeypatch):
+def test_indian_ocean_prints_basin_bbox(capsys, resolve_region, monkeypatch):
     def _fail_nominatim(query):
-        raise AssertionError(f"Nominatim should not run for Eastern Africa; got {query!r}")
+        raise AssertionError(f"Nominatim should not run for Indian Ocean; got {query!r}")
 
     monkeypatch.setattr("weather_skills_core.region._load_nominatim", _fail_nominatim)
 
-    run_skill(resolve_region, "East Africa")
-    east = capsys.readouterr().out.strip()
-    run_skill(resolve_region, "Eastern Africa")
-    eastern = capsys.readouterr().out.strip()
-    assert east == eastern
+    run_skill(resolve_region, "Indian Ocean")
+    assert capsys.readouterr().out.strip() == "30.0/20.0/-40.0/120.0"
+    run_skill(resolve_region, "Indian Ocean basin")
+    assert capsys.readouterr().out.strip() == "30.0/20.0/-40.0/120.0"
 
 
 def test_landmark_geojson_write(tmp_path, resolve_mod, monkeypatch):
@@ -229,3 +230,73 @@ def test_landmark_geojson_write(tmp_path, resolve_mod, monkeypatch):
     assert props["level"] == "nominatim"
     assert props["name"] == "Mount Kenya"
     assert data["features"][0]["geometry"]["type"] == "Polygon"
+
+
+def test_point_sized_nominatim_hit_is_refused(capsys, resolve_mod, monkeypatch):
+    from weather_skills_core.region import _nominatim_collection
+
+    point_hit = [
+        {
+            "display_name": "Indian Ocean Drive, Yanchep, Western Australia, Australia",
+            "name": "Indian Ocean Drive",
+            "boundingbox": ["-31.5044", "-31.5006", "115.6889", "115.6913"],
+            "geojson": {"type": "Point", "coordinates": [115.69, -31.502]},
+        }
+    ]
+    monkeypatch.setattr("weather_skills_core.region._load_nominatim", lambda query: point_hit)
+    _nominatim_collection.cache_clear()
+
+    with pytest.raises(SystemExit) as exc:
+        run_skill(resolve_mod.resolve_region, "western Indian Ocean")
+    assert exc.value.code != 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Indian Ocean Drive" in captured.err
+    assert "centre point" in captured.err
+
+
+def _point_hit(display, category, kind):
+    return [
+        {
+            "display_name": display,
+            "name": display.split(",")[0],
+            "category": category,
+            "type": kind,
+            "boundingbox": ["-0.1528", "-0.1527", "37.3091", "37.3092"],
+            "lat": "-0.15275",
+            "lon": "37.30915",
+        }
+    ]
+
+
+def test_point_landmark_is_padded(capsys, resolve_mod, monkeypatch, tmp_path):
+    from weather_skills_core.region import _nominatim_collection
+
+    hit = _point_hit("Batian, Embu, Kenya", "natural", "volcano")
+    monkeypatch.setattr("weather_skills_core.region._load_nominatim", lambda query: hit)
+    _nominatim_collection.cache_clear()
+
+    geo = tmp_path / "peak.geojson"
+    run_skill(
+        resolve_mod.resolve_region, "Mount Kenya, Kenya", "--pad", "0.5", "--geojson", str(geo)
+    )
+    captured = capsys.readouterr()
+    n, w, s, e = (float(v) for v in captured.out.strip().split("/"))
+    assert (n, w, s, e) == pytest.approx((0.3473, 36.8091, -0.6528, 37.8092))
+    assert "padded by 0.5" in captured.err
+    assert json.loads(geo.read_text())["features"][0]["geometry"]["type"] == "Polygon"
+
+
+def test_point_centroid_of_an_area_is_refused(capsys, resolve_mod, monkeypatch):
+    from weather_skills_core.region import _nominatim_collection
+
+    hit = _point_hit("Somali Peninsula, Bari, Somalia", "natural", "peninsula")
+    monkeypatch.setattr("weather_skills_core.region._load_nominatim", lambda query: hit)
+    _nominatim_collection.cache_clear()
+
+    with pytest.raises(SystemExit) as exc:
+        run_skill(resolve_mod.resolve_region, "Horn of Africa")
+    assert exc.value.code != 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "centre point" in captured.err

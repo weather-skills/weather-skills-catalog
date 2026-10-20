@@ -1,6 +1,6 @@
 ---
 name: mjo-forecast-fetch
-description: Fetch the latest CPC CLIVAR Madden–Julian Oscillation (MJO) Wheeler–Hendon phase-space forecast PNG for GEFS, GEFS-extended, CFS, CMC, JMA, ECMWF, ECMWF extended-range, or BoM ACCESS-S1 (bias-corrected preferred by default). Use when a task needs the published MJO RMM diagram image from https://www.cpc.ncep.noaa.gov/products/precip/CWlink/MJO/CLIVAR/clivar_wh.shtml; does not produce gridded data.
+description: "Download the latest CPC CLIVAR Madden–Julian Oscillation (MJO) Wheeler–Hendon phase-space forecast diagram as a PNG, for one of GEFS, GEFS extended, CFSv2, CMC, JMA, ECMWF, ECMWF extended range, or BoM ACCESS-S1. Use when a briefing or answer needs a model's published MJO RMM forecast plot."
 license: MIT
 compatibility: Requires Python 3.12 and uv. Fetches over HTTPS from www.cpc.ncep.noaa.gov; no credentials required.
 allowed-tools: Bash(uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py *)
@@ -15,88 +15,51 @@ metadata:
 
 # mjo-forecast-fetch
 
-Downloads the **latest** CPC CLIVAR dynamical-model MJO Wheeler–Hendon
-phase-space diagram PNG and writes it to `--output`. There is no Zarr input —
-this skill only produces a figure.
-
-Source page:
-
-https://www.cpc.ncep.noaa.gov/products/precip/CWlink/MJO/CLIVAR/clivar_wh.shtml
-
-Image URLs are **static** (CPC updates the same filenames in place):
-
-```
-https://www.cpc.ncep.noaa.gov/products/precip/mjo/img/<FILE>.png
-```
-
-## Models
-
-Not every system publishes both a raw and a bias-corrected diagram. Cells marked
-**—** mean CPC does not provide that variant.
-
-| `--model` | Bias-corrected (`--bias-corrected`) | Raw (`--no-bias-corrected`) | CPC heading |
-| --- | --- | --- | --- |
-| `gefs` | `GEFS_BC.png` | `GEFS.png` | NCPB / NCPE — NCEP GEFSv12 (daily) |
-| `gefs-extended` | — (falls back to raw) | `GMON.png` | GMON — NCEP GEFSv12 Extended (daily, day-1 init) |
-| `cfs` | `NCFS.png` | — | NCFS — NCEP CFSv2 bias-corrected (daily) |
-| `cmc` | — (falls back to raw) | `CANM.png` | CMET — Canadian ensemble (daily, day-1 init) |
-| `jma` | — (falls back to raw) | `JMAN.png` | JMAN — JMA GSM ensemble (daily) |
-| `ecmwf` | `ECMF_BC.png` | `ECMF.png` | ECMM / ECMF — ECMWF ensemble (daily) |
-| `ecmwf-extended-range` | `EMON_BC.png` | `EMON.png` | EMOM / EMON — ECMWF extended-range (2× weekly) |
-| `bom` | `BOMM_BC.png` | `BOMM.png` | BOMM / BOMA — BoM ACCESS-S1 (daily, day-2 init) |
-
-`--bias-corrected` (default **on**) prefers the bias-corrected file when CPC
-publishes one; for models with only a raw diagram it uses that raw file.
-`--no-bias-corrected` requires a raw diagram (errors for `cfs`, which is
-BC-only on CPC).
-
-## When to use
-
-- Need the published MJO RMM / phase-space forecast diagram for a CLIVAR model.
-- Prefer the official CPC figure rather than recomputing RMM indices.
-
-## When not to use
-
-- You need analyzable gridded OLR / u850 / u200 fields — this skill only
-  fetches PNGs.
-- You need a historical init date — only the latest overwritten image is
-  available at these URLs.
+Downloads one model's latest MJO phase-space forecast diagram from CPC and writes it as a PNG.
 
 ## Usage
 
-```
-uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py \
-    --model gefs|gefs-extended|cfs|cmc|jma|ecmwf|ecmwf-extended-range|bom \
-    [--bias-corrected | --no-bias-corrected] \
-    -o <out.png>
+```bash
+uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py --model MODEL [--bias-corrected | --no-bias-corrected] -o OUT.png
 ```
 
 ### Arguments
-
-- `--model` — required. One of the ids in the table above.
-- `--bias-corrected` / `--no-bias-corrected` — boolean flag (default:
-  bias-corrected on). See Models for which variants exist per system.
+- `--model` — forecast system. Required.
+  - `gefs` — NCEP GEFSv12, 16 days, daily.
+  - `gefs-extended` — GEFSv12 extended, 35 days, daily.
+  - `cfs` — NCEP CFSv2, daily.
+  - `cmc` — Canadian ensemble, daily.
+  - `jma` — JMA GSM ensemble, daily.
+  - `ecmwf` — ECMWF ensemble, 15 days, daily. Suits the next two weeks.
+  - `ecmwf-extended-range` — ECMWF 46-day run, twice weekly. Suits a week 2–4 sub-seasonal briefing.
+  - `bom` — BoM ACCESS-S1, daily.
+- `--bias-corrected`, `--no-bias-corrected` — use CPC's bias-corrected diagram or the raw one. Default: `--bias-corrected`, which uses the raw diagram (with a stderr note) for `gefs-extended`, `cmc`, and `jma`, where CPC publishes only raw. `--no-bias-corrected` exits 2 for `cfs`, which is bias-corrected only.
 - `--output`, `-o` — PNG output path.
 
 ### Output
+A PNG with `weather_skills_history` in its metadata. stderr names the model, the variant (`bias-corrected` or `raw`), and the URL.
 
-A PNG at `--output`. The decorator stamps `weather_skills_history` into the PNG
-metadata.
+### Notes
+- Only the latest forecast is available; CPC overwrites the same files. The init date is printed on the figure.
+- The output is an image only; there are no RMM values or gridded fields.
 
-## Examples
-
+### Example
 ```bash
-# Latest GEFS bias-corrected MJO diagram (default)
-uv run skills/mjo-forecast-fetch/scripts/fetch.py --model gefs -o /tmp/mjo_gefs.png
-
-# GEFS extended (raw only on CPC)
-uv run skills/mjo-forecast-fetch/scripts/fetch.py --model gefs-extended -o /tmp/mjo_gmon.png
-
-# JMA / BoM
-uv run skills/mjo-forecast-fetch/scripts/fetch.py --model jma -o /tmp/mjo_jma.png
-uv run skills/mjo-forecast-fetch/scripts/fetch.py --model bom -o /tmp/mjo_bom.png
-
-# ECMWF raw (not bias-corrected)
-uv run skills/mjo-forecast-fetch/scripts/fetch.py \
-  --model ecmwf --no-bias-corrected -o /tmp/mjo_ecmwf_raw.png
+uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py --model ecmwf-extended-range -o mjo_ecmwf_er.png
 ```
+Writes the latest bias-corrected ECMWF extended-range MJO phase diagram.
+
+## Details
+
+Source page: https://www.cpc.ncep.noaa.gov/products/precip/CWlink/MJO/CLIVAR/clivar_wh.shtml. Images are `https://www.cpc.ncep.noaa.gov/products/precip/mjo/img/<FILE>`:
+
+| `--model` | Bias-corrected | Raw |
+|---|---|---|
+| `gefs` | `GEFS_BC.png` | `GEFS.png` |
+| `gefs-extended` | — | `GMON.png` |
+| `cfs` | `NCFS.png` | — |
+| `cmc` | — | `CANM.png` |
+| `jma` | — | `JMAN.png` |
+| `ecmwf` | `ECMF_BC.png` | `ECMF.png` |
+| `ecmwf-extended-range` | `EMON_BC.png` | `EMON.png` |
+| `bom` | `BOMM_BC.png` | `BOMM.png` |

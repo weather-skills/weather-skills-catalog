@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from conftest import load_skill, run_skill
@@ -50,10 +51,10 @@ def test_fetch_africa_default_converts_jpeg_to_png(mod, monkeypatch, tmp_path):
     seen = {}
 
     def fake_urlopen(req, timeout=None):
-        seen["url"] = req.full_url
+        seen.setdefault("url", req.full_url)
 
         class Resp:
-            headers = {"Content-Type": "image/jpeg"}
+            headers: ClassVar[dict] = {"Content-Type": "image/jpeg"}
 
             def read(self):
                 return _valid_jpeg_bytes()
@@ -109,3 +110,41 @@ def test_location_files_match_page(mod):
         "east-africa": "east.gif",
         "west-africa": "west.gif",
     }
+
+
+def test_fetch_prints_analysed_dekad(mod, monkeypatch, tmp_path, capsys):
+    page = b"<p>From September 21-30, the Intertropical Front (ITF) moved southward</p>"
+
+    def fake_urlopen(req, timeout=None):
+        body = page if req.full_url == mod.PAGE_URL else _valid_png_bytes()
+
+        class Resp:
+            headers: ClassVar[dict] = {"Content-Type": "text/html"}
+
+            def read(self):
+                return body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        return Resp()
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", fake_urlopen)
+    run_skill(mod.fetch, "--location", "east-africa", "-o", str(tmp_path / "e.png"))
+    assert "Analysed dekad: September 21-30" in capsys.readouterr().err
+
+
+def test_fetch_warns_when_dekad_unreadable(mod, monkeypatch, tmp_path, capsys):
+    def fake_download(url, dest):
+        dest.write_bytes(_valid_png_bytes())
+
+    def fail_urlopen(req, timeout=None):
+        raise mod.urllib.error.URLError("offline")
+
+    monkeypatch.setattr(mod, "_download_as_png", fake_download)
+    monkeypatch.setattr(mod.urllib.request, "urlopen", fail_urlopen)
+    run_skill(mod.fetch, "-o", str(tmp_path / "a.png"))
+    assert "could not read the analysed dekad" in capsys.readouterr().err

@@ -1,10 +1,10 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core @ git+https://github.com/rhiza-research/weather-skills-core@main",
+#   "weather-skills-core>=0.1.1",
 # ]
 # ///
-"""Resolve a relative date query to absolute --start-time/--end-time or --date."""
+"""Turn a relative date such as last-2w into absolute YYYY-MM-DD dates."""
 
 import calendar
 import json
@@ -16,13 +16,13 @@ from weather_skills_core import UsageError, weather_skill
 from weather_skills_core.standard_utils import parse_date
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.2"
+_SKILL_VERSION = "0.0.3"
 
 _LAST_RE = re.compile(r"^last-(\d+)([dwmy])$")
 _NOW_RE = re.compile(r"^now-(\d+)([dwmy])$")
 _QUERY_HELP = (
     "queries: latest|now|today, yesterday, last-<N>d|w|m|y, now-<N>d|w|m|y, "
-    "this-week|month|year, last-week|month|year, YYYY-MM-DD, "
+    "this-week|dekad|month|year, last-week|dekad|month|year, YYYY-MM-DD, "
     "YYYY-MM-DD/YYYY-MM-DD, YYYY-MM, YYYY. "
     'Map English like "the last two weeks" to last-2w — do not pass free text.'
 )
@@ -48,7 +48,7 @@ def _shift(d: date, n: int, unit: str, *, window: bool) -> date:
 
 def _parse(query: str, as_of: date) -> tuple[date, date, str]:
     """Return (start, end, kind) against the calendar clock ``as_of``."""
-    q = query.strip()
+    q = query.strip().lower()
     if not q or " " in q:
         raise UsageError(
             f"unknown query {query!r}. {_QUERY_HELP}" if q else f"pass a query token. {_QUERY_HELP}"
@@ -81,6 +81,13 @@ def _parse(query: str, as_of: date) -> tuple[date, date, str]:
     if q == "last-week":
         start = as_of - timedelta(days=as_of.weekday() + 7)
         return start, start + timedelta(days=6), "range"
+    # Calendar dekads: days 1-10, 11-20, 21-end of month.
+    if q in ("this-dekad", "last-dekad"):
+        start = date(as_of.year, as_of.month, min((as_of.day - 1) // 10, 2) * 10 + 1)
+        if q == "this-dekad":
+            return start, as_of, "range"
+        end = start - timedelta(days=1)
+        return date(end.year, end.month, min((end.day - 1) // 10, 2) * 10 + 1), end, "range"
     if q == "this-month":
         return date(as_of.year, as_of.month, 1), as_of, "range"
     if q == "last-month":
@@ -124,7 +131,6 @@ def _parse(query: str, as_of: date) -> tuple[date, date, str]:
 @weather_skill.argument(
     "query",
     nargs="?",
-    default=None,
     help="Relative date token (last-2w, latest, now-3d, YYYY-MM-DD, …)",
 )
 @weather_skill.argument(
@@ -137,12 +143,21 @@ def _parse(query: str, as_of: date) -> tuple[date, date, str]:
     default="flags",
     help="stdout format: CLI flags (default), START/END, or JSON",
 )
-def resolve_time(query, as_of, emit="flags", **kwargs):
-    """Resolve a relative date query to absolute --start-time/--end-time or --date."""
+def resolve_time(query, as_of, emit, **kwargs):
+    """Turn a relative date such as last-2w into absolute YYYY-MM-DD dates."""
     if query is None:
         raise UsageError(f"pass a query token. {_QUERY_HELP}")
+    if as_of is not None and as_of.strip().lower() == "none":
+        # What a fetcher's --probe-latest prints when nothing is published.
+        raise UsageError(
+            "--as-of none: the fetcher's --probe-latest found no published data, so "
+            "there is no window to end on; check the product and dates before fetching"
+        )
     as_of_date = datetime.now(UTC).date() if as_of is None else parse_date(as_of)
-    start, end, kind = _parse(query, as_of_date)
+    try:
+        start, end, kind = _parse(query, as_of_date)
+    except (ValueError, OverflowError) as exc:
+        raise UsageError(f"{query!r} is outside the calendar range ({exc})") from None
     print(f"as_of={as_of_date.isoformat()}", file=sys.stderr)
 
     time_kind = "date" if kind == "point" else "range"

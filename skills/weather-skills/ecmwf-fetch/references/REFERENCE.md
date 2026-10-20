@@ -1,7 +1,44 @@
 # ecmwf-fetch reference
 
-Prefer `dynamical-fetch` (`ecmwf-ifs-ens-forecast-15-day-0-25-degree` or
-`ecmwf-aifs-ens-forecast`) for medium-range ECMWF. This skill is S2S via ECDS.
+## dynamical.org catalog (default)
+
+Dataset id: `ecmwf-ifs-ens-forecast-46-day-daily-1-5-degree` (read from the
+production catalog, or the staging catalog when production does not list it). 101 members, 1.5°,
+daily 00 UTC inits from 2026-01-01, 47 daily leads (0–1104 h). Surface
+fields at the store root; pressure fields in `group="pressure_level"`.
+Catalog precip is already a rate (`kg m-2 s-1`). 24-hour surface
+statistics are all-NaN at lead 0; this skill drops that lead and shifts
+remaining steps so `step=0` is the first 24 h. Pressure fields carry all
+101 members on 10 levels (1000–10 hPa); `q` is NaN above 200 hPa.
+
+The catalog stores SST as `sea_surface_temperature` (not `sst`). This skill
+accepts `-v sst` / `wtmp` and writes the S2S short name `sst`.
+
+| `-v` | Catalog field |
+|---|---|
+| `tp` | `precipitation_surface` |
+| `t2m` | `average_temperature_2m` |
+| `sst` | `sea_surface_temperature` |
+| `d2m` | `average_dew_point_temperature_2m` |
+| `u10` / `v10` | `wind_u_10m` / `wind_v_10m` |
+| `msl` | `pressure_reduced_to_mean_sea_level` |
+| `cape` | `average_convective_available_potential_energy_atmosphere` |
+| `tcw` | `total_column_water_atmosphere` |
+| `skt` / `tcc` / `sp` | `skin_temperature_surface` / `total_cloud_cover_atmosphere` / `pressure_surface` |
+| `sd` / `rsn` / `asn` | `snow_water_equivalent_surface` / `snow_density_surface` / `snow_albedo_surface` |
+| `sm20` / `sm100` | `soil_moisture_0_20cm` / `soil_moisture_0_100cm` |
+| `st20` / `st100` | `soil_temperature_0_20cm` / `soil_temperature_0_100cm` |
+| `ci` | `sea_ice_area_fraction` |
+| `cp` / `sf` | `precipitation_convective_surface` / `snowfall_water_equivalent_rate_surface` |
+| `ewss` / `nsss` | `eastward_turbulent_surface_stress` / `northward_turbulent_surface_stress` |
+| `ro` / `sro` | `runoff_water_equivalent_surface` / `runoff_surface` |
+| `gh` / `t` / `u` / `v` / `w` / `q` | `pressure_level` group: `geopotential_height`, `temperature`, `wind_u`, `wind_v`, `vertical_velocity`, `specific_humidity` |
+
+Not mapped (ECDS fallback): `mx2t6`, `mn2t6` (catalog 24 h max/min is a
+different statistic), accumulated fluxes (`sshf`, `slhf`, `ssr`, `ssrd`,
+`str`, `strd`, `ttr`), static fields (`lsm`, `orog`, `slt`), `pv`, and
+ocean parameters. Mixed catalog + unmapped fields in one call also use
+ECDS. Pre-2026 inits use ECDS.
 
 ## ECDS request
 
@@ -26,7 +63,8 @@ Both the control and perturbed retrievals target the `s2s-forecasts` collection 
 `-v` uses cfgrib short names. Instant/accumulated fields share the integer
 `leadtime_hour` list above. Daily-mean fields are a separate ECDS request
 whose `leadtime_hour` values are 24-hour windows aligned to those leads
-(`0` → `0_24`, `24` → `0_24`, `48` → `24_48`, …). Pressure-level fields use
+(`0` → `0_24`, `24` → `0_24`, `48` → `24_48`, …); the skill labels each
+window at its start, so `0_24` is `step = 0`. Pressure-level fields use
 `level_type=pressure_level` and `pressure_level` (1000–10 hPa, or 1000–200
 hPa for `q`). Potential vorticity uses `level_type=potential_temperature`
 and level 320 K. Those vertical fields are control-forecast only.

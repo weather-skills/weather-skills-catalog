@@ -9,6 +9,10 @@ HTTPS:
 
 `https://storage.googleapis.com/sheerwater-public-datalake/chc-mirror/experimental/SubC/`
 
+Fallback origin (used when a mirror object is missing):
+
+`https://data.chc.ucsb.edu/experimental/SubC/`
+
 Paths mirror `data.chc.ucsb.edu/experimental/SubC/` exactly.
 
 ## Outlook folders
@@ -22,8 +26,8 @@ Paths mirror `data.chc.ucsb.edu/experimental/SubC/` exactly.
 Each file is a single field for that outlook: a mean (temps) or sum (precip)
 over the window from the init date through that lead (`window_start` /
 `window_end` / `window_days` in the NetCDF attrs). The skill fetches **one**
-outlook per call. Envelope `time` is the outlook valid date (init + lead
-days); `step` is the outlook length; archive init is `initialization_date`.
+outlook per call. In the output Zarr, scalar `time` is the init, `step` is
+`0 days`, and the window length is each variable's `aggregation_period`.
 
 ## Global archive paths
 

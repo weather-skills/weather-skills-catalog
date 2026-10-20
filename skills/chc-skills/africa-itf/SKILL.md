@@ -1,6 +1,6 @@
 ---
 name: africa-itf
-description: Fetch the latest NOAA/CPC Africa Intertropical Front (ITF) / Intertropical Convergence Zone (ITCZ) position figure for continental Africa (default), West Africa, or East Africa. Use when a task needs the published dekadal ITF or ITCZ map from https://www.cpc.ncep.noaa.gov/products/international/itf/itcz.shtml (CPC uses both terms); does not produce gridded data.
+description: "Download the latest NOAA/CPC Africa Intertropical Front (ITF) figure, which CPC also labels ITCZ, as a PNG: the continental position map (current vs mean) or the west or east latitude-by-dekad time series. Use when a briefing or answer needs CPC's published ITF / ITCZ position figure for the most recent dekad."
 license: MIT
 compatibility: Requires Python 3.12 and uv. Fetches over HTTPS from www.cpc.ncep.noaa.gov; no credentials required.
 allowed-tools: Bash(uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py *)
@@ -15,69 +15,42 @@ metadata:
 
 # africa-itf
 
-Downloads the **latest** NOAA Climate Prediction Center (CPC) Africa
-Intertropical Front (ITF) position figure and writes it as a PNG to
-`--output`. CPC labels the same product **ITCZ** (Intertropical Convergence
-Zone) on its source page — users may ask for either term. There is no Zarr
-input — this skill only produces a figure.
-
-Source page (ITF / ITCZ):
-
-https://www.cpc.ncep.noaa.gov/products/international/itf/itcz.shtml
-
-Image URLs are **static** (CPC updates the same filenames in place each
-dekadal analysis). Upstream formats are JPEG (continental map) or PNG bytes
-under a `.gif` suffix (regional time series); this skill always writes PNG.
-
-## Location → URL mapping
-
-| `--location` | CPC page label | Source URL |
-| --- | --- | --- |
-| `africa` (default) | Mean vs Current (continental ITF position map) | `https://www.cpc.ncep.noaa.gov/products/international/itf/itcz.jpg` |
-| `west-africa` | West Region (western ITF latitudinal time series) | `https://www.cpc.ncep.noaa.gov/products/international/itf/west.gif` |
-| `east-africa` | East Region (eastern ITF latitudinal time series) | `https://www.cpc.ncep.noaa.gov/products/international/itf/east.gif` |
-
-## When to use
-
-- User asks for the Africa **ITF** or **ITCZ** position, map, or latitude
-  time series (CPC treats them as the same product).
-- Need the published dekadal ITF/ITCZ position map or west/east latitude time
-  series.
-- Prefer the official CPC figure rather than reconstructing ITF/ITCZ positions.
-
-## When not to use
-
-- You need analyzable ITF latitude coordinates — use the CPC FEWS ITF text
-  archive (`ftp.cpc.ncep.noaa.gov/fews/itf/`), not this figure skill.
-- You need a historical dekad other than the latest overwritten image.
+Downloads CPC's latest Africa ITF figure and writes it as a PNG.
 
 ## Usage
 
-```
-uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py \
-    [--location africa|west-africa|east-africa] \
-    -o <out.png>
+```bash
+uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py [--location africa|west-africa|east-africa] -o OUT.png
 ```
 
 ### Arguments
-
-- `--location` — `africa` (default), `west-africa`, or `east-africa`.
+- `--location` — which figure. Default: `africa`.
+  - `africa` — continental map of the current ITF position against its mean.
+  - `west-africa`, `east-africa` — line chart of the ITF's mean latitude by dekad since April, averaged over a fixed longitude band (east: 20E–35E).
 - `--output`, `-o` — PNG output path.
 
 ### Output
+A PNG with `weather_skills_history` in its metadata. stderr names the analysed dekad read from the CPC page (e.g. `Analysed dekad: September 21-30`); if the page text cannot be read, stderr warns and the date is only on the figure.
 
-A PNG at `--output`. The decorator stamps `weather_skills_history` into the PNG
-metadata.
+### Notes
+- Only the latest dekad is available; CPC overwrites the same image files each analysis.
+- The `east-africa` band lies west of Kenya (34–42E). For Kenya or the Horn of Africa, use the `africa` map.
+- The output is an image only; there is no gridded data.
 
-## Examples
-
+### Example
 ```bash
-# Continental Africa ITF map (default)
-uv run skills/africa-itf/scripts/fetch.py -o /tmp/itf_africa.png
-
-# West Africa regional time series
-uv run skills/africa-itf/scripts/fetch.py --location west-africa -o /tmp/itf_west.png
-
-# East Africa regional time series
-uv run skills/africa-itf/scripts/fetch.py --location east-africa -o /tmp/itf_east.png
+uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py -o itf_africa.png
 ```
+Writes the latest continental ITF position map.
+
+## Details
+
+Source page: https://www.cpc.ncep.noaa.gov/products/international/itf/itcz.shtml
+
+| `--location` | CPC page label | Source image |
+| --- | --- | --- |
+| `africa` | Mean vs Current | `itcz.jpg` (JPEG) |
+| `west-africa` | West Region | `west.gif` (PNG bytes) |
+| `east-africa` | East Region | `east.gif` (PNG bytes) |
+
+The skill converts every source to PNG.

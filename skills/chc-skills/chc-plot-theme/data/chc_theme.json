@@ -1,0 +1,13 @@
+{
+  "colormaps": {
+    "chc_precip_daily": {"colors": ["#ffffff", "#ffffff", "#f6e8c3", "#e8d4a0", "#c8ffbe", "#78f573", "#1eb41e", "#50a5f5", "#1e6eeb", "#a08cff", "#7060dc"], "bounds": [0, 1, 2, 5, 10, 15, 20, 30, 40, 50]},
+    "chc_precip_week": {"colors": ["#ffffff", "#ffffff", "#f6e8c3", "#e8d4a0", "#c8ffbe", "#78f573", "#1eb41e", "#50a5f5", "#1e6eeb", "#a08cff", "#7060dc", "#fffaaa", "#ffa000", "#ff1400", "#a50000"], "bounds": [0, 1, 2, 5, 10, 15, 20, 30, 40, 50, 75, 100, 150, 200]},
+    "chc_precip_month": {"colors": ["#ffffff", "#ffffff", "#f6e8c3", "#e8d4a0", "#c8ffbe", "#78f573", "#1eb41e", "#50a5f5", "#1e6eeb", "#a08cff", "#7060dc", "#fffaaa", "#ffa000", "#ff1400", "#a50000", "#e68c8c"], "bounds": [0, 1, 2, 5, 10, 15, 20, 30, 40, 50, 75, 100, 150, 200, 400]},
+    "chc_precip_season": {"colors": ["#ffffff", "#ffffff", "#f6e8c3", "#e8d4a0", "#c8ffbe", "#78f573", "#1eb41e", "#50a5f5", "#1e6eeb", "#a08cff", "#7060dc", "#fffaaa", "#ffa000", "#ff1400", "#a50000", "#e68c8c", "#7a0000", "#5a0000"], "bounds": [0, 1, 2, 5, 10, 15, 20, 30, 40, 50, 75, 100, 150, 200, 400, 700, 1000]},
+    "chc_precip_anom_daily": {"colors": ["#785046", "#b48c82", "#f0dcd2", "#ffffff", "#c8ffbe", "#78f573", "#1eb41e"], "bounds": [-50, -25, -10, 10, 25, 50]},
+    "chc_precip_anom_week": {"colors": ["#ffa000", "#ffe878", "#785046", "#b48c82", "#f0dcd2", "#ffffff", "#c8ffbe", "#78f573", "#1eb41e", "#96d2fa", "#2882f0"], "bounds": [-200, -100, -50, -25, -10, 10, 25, 50, 100, 200]},
+    "chc_precip_anom_month": {"colors": ["#ff3200", "#ffa000", "#ffe878", "#785046", "#b48c82", "#f0dcd2", "#ffffff", "#c8ffbe", "#78f573", "#1eb41e", "#96d2fa", "#2882f0", "#dcdcff"], "bounds": [-300, -200, -100, -50, -25, -10, 10, 25, 50, 100, 200, 300]},
+    "chc_precip_anom_season": {"colors": ["#c00000", "#ff3200", "#ffa000", "#ffe878", "#785046", "#b48c82", "#f0dcd2", "#ffffff", "#c8ffbe", "#78f573", "#1eb41e", "#96d2fa", "#2882f0", "#dcdcff", "#8070eb"], "bounds": [-500, -300, -200, -100, -50, -25, -10, 10, 25, 50, 100, 200, 300, 500]},
+    "kmsa": {"colors": ["#ffffff", "#ffffff", "#d1ffbe", "#55ff00", "#73dfff", "#00a9e6", "#ffaa00", "#ff5500"], "bounds": [0, 1, 10, 20, 50, 70, 100]}
+  }
+}

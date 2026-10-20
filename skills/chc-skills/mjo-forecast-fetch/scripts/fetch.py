@@ -1,10 +1,10 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core @ git+https://github.com/rhiza-research/weather-skills-core@main",
+#   "weather-skills-core>=0.1.1",
 # ]
 # ///
-"""Fetch the latest CPC CLIVAR MJO Wheeler–Hendon phase-space forecast PNG."""
+"""Download the latest CPC CLIVAR MJO phase-space forecast diagram for one model as a PNG."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from pathlib import Path
 from weather_skills_core import DataError, UsageError, weather_skill
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.3"
+_SKILL_VERSION = "0.0.4"
 
 # Latest diagrams are served at fixed filenames under this directory (updated in place).
 # Relative paths on the CLIVAR page resolve here:
@@ -59,9 +59,7 @@ def _image_url(model: str, bias_corrected: bool) -> str:
     raw for this model, use raw. ``False``: require a raw diagram.
     """
     if model not in MODELS:
-        raise UsageError(
-            f"unknown --model {model!r}; choose one of: {', '.join(MODEL_CHOICES)}"
-        )
+        raise UsageError(f"unknown --model {model!r}; choose one of: {', '.join(MODEL_CHOICES)}")
     variants = MODELS[model]
     if bias_corrected:
         filename = variants.get("bc") or variants.get("raw")
@@ -104,8 +102,7 @@ def _download(url: str, dest: Path) -> None:
     required=True,
     choices=list(MODEL_CHOICES),
     help=(
-        "Forecast model: gefs, gefs-extended, cfs, cmc, jma, ecmwf, "
-        "ecmwf-extended-range, or bom."
+        "Forecast model: gefs, gefs-extended, cfs, cmc, jma, ecmwf, ecmwf-extended-range, or bom."
     ),
 )
 @weather_skill.argument(
@@ -119,12 +116,10 @@ def _download(url: str, dest: Path) -> None:
     ),
 )
 def fetch(model, bias_corrected, output, **kwargs):
-    """Fetch the latest CPC CLIVAR MJO phase-space forecast PNG for one model.
-
-    Downloads a pre-rendered Wheeler–Hendon diagram from the static CPC image
-    URLs (latest forecast only; filenames are overwritten upstream daily / 2×
-    weekly). Writes the PNG to ``--output``. No Zarr input.
-    """
+    """Download the latest CPC CLIVAR MJO phase-space forecast diagram for one model as a PNG."""
+    # Downloads a pre-rendered Wheeler–Hendon diagram from the static CPC image
+    # URLs (latest forecast only; filenames are overwritten upstream daily / 2×
+    # weekly). Writes the PNG to ``--output``. No Zarr input.
     url = _image_url(model, bool(bias_corrected))
     variants = MODELS[model]
     if bias_corrected and "bc" not in variants and "raw" in variants:
@@ -133,7 +128,8 @@ def fetch(model, bias_corrected, output, **kwargs):
             file=sys.stderr,
         )
     output = Path(output)
-    print(f"Fetching {url}", file=sys.stderr)
+    variant = "bias-corrected" if bias_corrected and "bc" in variants else "raw"
+    print(f"Fetching {model} ({variant}): {url}", file=sys.stderr)
     _download(url, output)
     return output
 

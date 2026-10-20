@@ -1,0 +1,43 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "iso3": "KEN",
+        "name": "Kenya OND region",
+        "region_name": "kenya_ond_region",
+        "level": "custom",
+        "country": "Kenya",
+        "source": "CHC Kenya OND briefing analog box, 5°S–5°N, 36.5–42°E (central and eastern Kenya, east of the Rift)"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              36.5,
+              -5.0
+            ],
+            [
+              42.0,
+              -5.0
+            ],
+            [
+              42.0,
+              5.0
+            ],
+            [
+              36.5,
+              5.0
+            ],
+            [
+              36.5,
+              -5.0
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

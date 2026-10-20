@@ -1,8 +1,8 @@
 ---
 name: subc-mme-fetch
-description: Fetch one CHC SubC multi-model-ensemble (MME) outlook — 7d, 15d, or 30d — for selected climate variables (pr/tas/tasmax/tasmin/tdps/ts mean + anomaly) from the public global archive into a weather-skills forecast Zarr. Use when a task needs a single SubC MME outlook map for clipping, comparison, or plotting; use --probe-latest with a variable to find the latest published init.
+description: "Fetch one CHC SubC multi-model-ensemble outlook (7-, 15-, or 30-day) for an init date as a weather-skills forecast Zarr: the ensemble mean and anomaly of precipitation, near-surface air, max, min, dewpoint, or surface temperature on a global 1° grid, optionally cut to a bbox. Use when a task needs a CHC SubC outlook map or its anomalies for one window."
 license: MIT
-compatibility: Requires Python 3.12 and uv. Fetches over HTTPS from the public GCS mirror gs://sheerwater-public-datalake/chc-mirror (SubC layout matches data.chc.ucsb.edu); no credentials required.
+compatibility: Requires Python 3.12 and uv. Fetches the public GCS mirror first (gs://sheerwater-public-datalake/chc-mirror), then falls back to data.chc.ucsb.edu. No credentials required.
 allowed-tools: Bash(uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py *)
 metadata:
   catalog-group: fetchers
@@ -15,109 +15,41 @@ metadata:
 
 # subc-mme-fetch
 
-Downloads **one** CHC SubC **global** multi-model-ensemble outlook for one
-initialization date and writes a weather-skills forecast envelope Zarr.
-
-Outlooks are separate forecasts — pick exactly one with `--outlook`:
-
-| `--outlook` | Archive folder | Window |
-| --- | --- | --- |
-| `7d` | `07_day` | init → init+7d |
-| `15d` | `15_day` | init → init+15d |
-| `30d` | `30_day` | init → init+30d |
-
-Source layout (GCS mirror of the CHC SubC archive):
-
-```
-gs://sheerwater-public-datalake/chc-mirror/experimental/SubC/{07_day|15_day|30_day}/global/archive/
-  mme_mean_{var}_{7d|15d|30d}_{YYYYMMDD}.nc
-  mme_anom_{var}_{7d|15d|30d}_{YYYYMMDD}.nc
-```
-
-HTTPS equivalent:
-
-```
-https://storage.googleapis.com/sheerwater-public-datalake/chc-mirror/experimental/SubC/...
-```
-
-Each NetCDF is a single 2D window field. This skill fetches mean + anomaly for
-the selected climate variables at **one** outlook only (not all three leads).
-
-## When to use
-
-- Need a SubC MME mean and/or anomaly map for one outlook length on the global
-  1° grid.
-- Downstream clipping, aggregation, comparison, or plotting.
-
-Prefer other fetchers when you need daily steps, per-model members, or a
-non-SubC source.
+Downloads the mean and anomaly fields of one SubC MME outlook and writes them as a single-lead forecast Zarr.
 
 ## Usage
 
-```
-uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py --date YYYY-MM-DD --outlook 7d|15d|30d \
-    [--bbox N/W/S/E] [-v VAR ...] [--workers N] -o <path.zarr>
-
-uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py --outlook 7d|15d|30d \
-    --probe-latest [VAR]
+```bash
+uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py --date YYYY-MM-DD --outlook 7d|15d|30d [--bbox N/W/S/E] [-v VAR ...] [--workers N] -o OUT.zarr
+uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py --outlook 7d|15d|30d --probe-latest [VAR]
 ```
 
 ### Arguments
-
-- `--date` — archive init date `YYYY-MM-DD` (required unless probing). Matches
-  the archive filename date / `window_start`.
-- `--outlook` — required. One of `7d`, `15d`, `30d`. Selects which SubC
-  outlook forecast to fetch (three separate products; one per call).
-- `--bbox` — optional spatial subset `N/W/S/E`.
-- `--variable`, `-v` — climate variables (repeatable). Allowed: `pr`, `tas`,
-  `tasmax`, `tasmin`, `tdps`, `ts`. Default: all six. For each selected
-  variable both mean and anomaly are fetched.
-- `--workers` — concurrent remote opens (default 4).
-- `--output`, `-o` — output Zarr path (not needed with `--probe-latest`).
-- `--probe-latest [VAR]` — print the latest available init `YYYY-MM-DD` for
-  this `--outlook` on stdout and exit. **Pass a climate variable** (e.g.
-  `--probe-latest ts`) unless you truly need the latest date common to
-  **all** six variables — probing every variable is slower and stricter.
-  Optional `VAR` must be one of the climate variables above. Does not
-  download fields.
+- `--date` — init date, as in the archive filename. Required unless probing.
+- `--outlook` — window length: `7d`, `15d`, or `30d`. Each is a separate forecast; one per call. Required.
+- `--bbox` — `N/W/S/E`. Keeps every 1° cell that overlaps the box, including cells whose centre is just outside. Default: global.
+- `--variable`, `-v` — `pr` (precipitation), `tas` (near-surface air temperature), `tasmax`, `tasmin`, `tdps` (dewpoint), `ts` (surface temperature); repeat for several. Default: all six.
+- `--workers` — concurrent downloads, at least 1. Default: 4.
+- `--probe-latest` — print the latest init for this `--outlook` (or `none`) and exit, no `-o`. With `VAR`, checks that variable only; without, the latest init common to all six (slower). stderr gives the init's age and warns when its window has already ended.
+- `--output`, `-o` — output Zarr.
 
 ### Output
+- Dims `(step, latitude, longitude)`, `step = 0 days`, scalar `time` = init. The window runs from the init for `aggregation_period` (`7 day`, `15 day`, `30 day`), e.g. `--date 2025-12-01 --outlook 7d` covers 2025-12-01 to 2025-12-08.
+- Variables: the ensemble mean under the bare name (`pr`, `ts`, …) and `{var}_anomaly`.
+- `pr` and `pr_anomaly` are window totals in `mm` (`cell_methods: time: sum`). Temperatures are window means (`time: mean`): `tas`, `tasmax`, `tasmin` in `degree_Celsius`, `ts` and `tdps` in `K`; every temperature anomaly is a difference in `delta_degC`.
+- Attrs: `outlook`, `initialization_date`, `outlook_valid_date` (window end), `weather_skills_source = chc-subc-mme`.
 
-Classic single-lead forecast envelope:
+### Notes
+- SubC publishes irregularly: the latest init can be weeks old with its window already over. Probe first and check the window covers the period you need.
+- `pr` is already a total; do not convert it to totals again.
+- To mask to a country or basin, clip with its polygon after fetching.
 
-- scalar `time` — outlook **valid date** = `--date` (archive init) **+**
-  outlook days (e.g. `--date 2025-12-01 --outlook 7d` → `time` is
-  `2025-12-08`)
-- `step` — one value, the outlook length (`7`, `15`, or `30` days as
-  `timedelta64`)
-- archive init kept as attrs `initialization_date` and
-  `outlook_valid_date` (same as `time`)
-- `latitude`, `longitude` — 1° grid (or bbox subset)
-- data variables: bare name for the MME mean (`pr`, `tas`, …) and
-  `{var}_anomaly` for the anomaly (`pr_anomaly`, `tas_anomaly`, …)
-
-Precipitation means are **window sums** in `mm` (not rates). Temperature-family
-fields are window means (source units typically `K`; converted to standard
-display units when classified).
-
-Stamped with `weather_skills_source=chc-subc-mme` and `outlook=7d|15d|30d`.
-
-### Provenance
-
-The decorator stamps `weather_skills_history` on write. Inspect with the
-`provenance` skill when available.
-
-## Examples
-
+### Example
 ```bash
-# Latest init for the 7-day ts outlook (prefer a variable on probe-latest)
-uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py --outlook 7d --probe-latest ts
-
-# Fetch that 7-day outlook for ts + pr
-uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py --date 2025-12-01 --outlook 7d \
-    --bbox 20/30/-20/120 -v ts -v pr -o /tmp/subc_7d.zarr
-
-# Separate 30-day outlook fetch
-uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py --date 2025-12-01 --outlook 30d \
-    -v ts -o /tmp/subc_30d.zarr
+uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py --date 2025-12-01 --outlook 7d --bbox 5.5/33.5/-5/42.5 -v pr -o subc_7d_kenya.zarr
 ```
+Writes the 7-day precipitation total and anomaly from the 2025-12-01 init over Kenya on 1° cells.
+
+## Details
+
+Archive layout and the mirror / origin fallback: [references/REFERENCE.md](references/REFERENCE.md).

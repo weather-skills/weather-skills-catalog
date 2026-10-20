@@ -1,63 +1,45 @@
 ---
 name: convert-to-totals
-description: Convert rate variables to period totals by multiplying by stamped aggregation_period (pint). Use as a terminal step before plotting. Requires aggregate-temporal first. Refuses precip totals (would double-count). Default --min-coverage 1.0. Refuses overlapping intervals — run select on time/step first.
+description: "Convert precipitation mean rates in a time-aggregated weather-skills Zarr into period totals in mm, by multiplying each interval's rate by its stamped aggregation period (calendar months by their real length). Use when you need weekly, monthly, or seasonal rainfall amounts for a map, table, or comparison."
 license: MIT
 compatibility: Requires Python 3.12 and uv.
 allowed-tools: Bash(uv run ${CLAUDE_SKILL_DIR}/scripts/convert_to_totals.py *)
 metadata:
+  version: "0.0.3"
   catalog-group: transforms
 ---
 
 # convert-to-totals
 
-Terminal conversion: **rate × stamped `aggregation_period` → amount**.
-
-Intended only before plot/export. Refuses precip totals (`cell_methods` with
-`sum`, or amount units) — multiplying an amount by the period would
-double-count.
-
-## When to use
-
-- After `aggregate-temporal` (which stamps `aggregation_period`,
-  `aggregation_coverage`, and `cell_methods` with `mean`/`minimum`/`maximum`).
-- When you need depth totals (`mm`) for display, not further rate math.
-- Native-only cubes (`data_interval` or CF bounds, but no `aggregation_period`) will not
-  convert — aggregate first.
+Turns precipitation rates (e.g. `mm day-1`) into amounts (`mm`) for each aggregated interval.
 
 ## Usage
 
-```
-uv run ${CLAUDE_SKILL_DIR}/scripts/convert_to_totals.py \
-    -i <rates.zarr> -o <totals.zarr> \
-    [--variable NAME ...] [--min-coverage 1.0] [--time-dim DIM]
+```bash
+uv run ${CLAUDE_SKILL_DIR}/scripts/convert_to_totals.py -i RATES.zarr -o TOTALS.zarr [-v VAR ...] [--min-coverage 1.0] [--time-dim DIM]
 ```
 
 ### Arguments
+- `--input`, `-i` — input Zarr of precipitation rates stamped with `aggregation_period`.
+- `--output`, `-o` — output Zarr.
+- `--variable`, `-v` — precipitation variable to convert; repeat for several. Default: every precipitation-rate variable. Naming a non-precipitation variable exits non-zero.
+- `--min-coverage` — drop intervals whose `aggregation_coverage` (share of samples with data, 0–1) is below this. Default: `1.0`.
+- `--time-dim` — interval axis. Default: `time`, or `step` when there is no `time` axis or `time` has one value.
 
-- `--min-coverage` — drop intervals whose `aggregation_coverage` is below this
-  (0–1). Default **1.0** (every native sample present). `aggregate-temporal`
-  keeps incomplete bins and only stamps coverage; this flag is what filters
-  them. A 21-day bin that only has 90% of the expected slots fails at the
-  default; pass `0.6` to allow it. If no intervals remain, the skill errors.
-- `--variable`, `-v` — limit to named data vars (default: all).
-- `--time-dim` — time/step dim for the overlap gate (default: CF time or `step`).
+### Output
+- Each converted variable is rate × interval length, in `mm`, with the precipitation-amount `standard_name`, `long_name` `Total precipitation`, and `cell_methods` `{dim}: sum`. Product rate attrs (`comment`, `short_name`, `step_type`) are dropped. `aggregation_period` is kept.
+- Fixed periods (`1 day`, `7 day`, `1 dekad`) use one length for every label; calendar periods (`1 month`, `1 year`) use each label's real length (January 31 days, February 28 or 29).
+- Mass-flux rates (`kg m-2 s-1`) convert through water density (1 kg m-2 = 1 mm).
+- Other variables pass through unchanged. Dropped intervals are listed on stderr. `aggregation_coverage` is removed when every remaining interval is complete.
 
-There is no `--aggregation-period` override. The period comes from the
-stamped attr.
+### Notes
+- Input must be a precipitation **mean** rate with `aggregation_period` on the variable (written by aggregate-temporal). Missing `aggregation_period`, a `max`/`min` (`cell_methods` maximum/minimum), or an amount (`mm` units or `cell_methods` sum) exits non-zero.
+- Intervals must not overlap: each label's interval must end at or before the next label. Back-to-back windows pass; a rolling series is refused, so keep a non-overlapping subset of times first. A single interval, or a dataset whose time axis was already collapsed to one value, always passes.
+- Keep `--min-coverage 1.0`. A lower value multiplies an incomplete interval's mean by the full period, filling missing days with that mean; the skill warns and keeps `aggregation_coverage` to mark those estimates.
+- When no interval meets `--min-coverage`, it exits non-zero; usually the data end before the last period does, so end the input on the last available day.
 
-### Gate
-
-When spacing can be inferred (≥ 2 points), requires sample spacing on the
-time/step axis **≥** `aggregation_period`. End-over-end weekly means
-(Δt = 7 day, period = 7 day) are allowed. Overlapping series (rolling
-`--window`, or two 21-day intervals 10 days apart) are refused — **run
-`select`** (`--dim time` or `--dim step`, by `--index` or `--value`) to keep
-a non-overlapping subset, then convert-to-totals. A **single** time/step
-point (one aggregated bin) is allowed.
-
-### Output metadata
-
-- Amount `units` / precip `standard_name` when applicable.
-- Precip `long_name` (and rate-like `GRIB_name`) → `Total precipitation`.
-- `cell_methods` → `{dim}: sum`.
-- `aggregation_period` and `aggregation_coverage` removed.
+### Example
+```bash
+uv run ${CLAUDE_SKILL_DIR}/scripts/convert_to_totals.py -i chirps_kenya_weekly.zarr -o chirps_kenya_weekly_mm.zarr
+```
+Writes weekly CHIRPS rainfall totals in mm over Kenya, dropping any week with missing days.

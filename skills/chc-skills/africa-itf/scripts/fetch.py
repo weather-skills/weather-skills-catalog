@@ -1,15 +1,16 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core @ git+https://github.com/rhiza-research/weather-skills-core@main",
+#   "weather-skills-core>=0.1.1",
 #   "pillow>=10",
 # ]
 # ///
-"""Fetch the latest NOAA/CPC Africa Intertropical Front (ITF) position figure."""
+"""Download the latest NOAA/CPC Africa Intertropical Front (ITF) figure as a PNG."""
 
 from __future__ import annotations
 
 import io
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -19,11 +20,12 @@ from PIL import Image
 from weather_skills_core import DataError, UsageError, weather_skill
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.3"
+_SKILL_VERSION = "0.0.4"
 
 # Source page (images updated in place each dekadal analysis season):
 #   https://www.cpc.ncep.noaa.gov/products/international/itf/itcz.shtml
 IMG_BASE = "https://www.cpc.ncep.noaa.gov/products/international/itf"
+PAGE_URL = f"{IMG_BASE}/itcz.shtml"
 _HTTP_TIMEOUT = 60
 
 # Location id → CPC static path (page labels: Mean vs Current / West / East).
@@ -69,7 +71,7 @@ def _download_as_png(url: str, dest: Path) -> None:
                 img = img.convert("RGBA")
             dest.parent.mkdir(parents=True, exist_ok=True)
             img.save(dest, format="PNG")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Pillow raises many types for a bad image
         raise DataError(
             f"downloaded {url!r} is not a usable image "
             f"(content-type={content_type!r}, size={len(data)}): {exc}"
@@ -86,21 +88,41 @@ def _download_as_png(url: str, dest: Path) -> None:
     default="africa",
     choices=list(LOCATION_CHOICES),
     help=(
-        "ITF region: africa (default, continental map), west-africa, or east-africa."
+        "africa (default): continental ITF position map. west-africa / east-africa: "
+        "latitude-vs-dekad time series of the ITF averaged over a fixed longitude band "
+        "(east = 20E-35E, which excludes Kenya), not maps."
     ),
 )
 def fetch(location, output, **kwargs):
-    """Fetch the latest NOAA/CPC Africa ITF position figure as a PNG.
-
-    Downloads a pre-rendered dekadal ITF map from the static CPC URLs on
-    https://www.cpc.ncep.noaa.gov/products/international/itf/itcz.shtml
-    (filenames updated in place). Converts JPEG/GIF-labeled sources to PNG.
-    No Zarr input — figure-only skill.
-    """
+    """Download the latest NOAA/CPC Africa Intertropical Front (ITF) figure as a PNG."""
+    # Downloads a pre-rendered dekadal ITF figure (continental map, or a west/east
+    # latitude time series) from the static CPC URLs on
+    # https://www.cpc.ncep.noaa.gov/products/international/itf/itcz.shtml
+    # (filenames updated in place). Converts JPEG/GIF-labeled sources to PNG.
+    # No Zarr input — figure-only skill. Prints the analysed dekad on stderr.
     url = _image_url(location)
     output = Path(output)
     print(f"Fetching {location}: {url}", file=sys.stderr)
     _download_as_png(url, output)
+
+    # The images are overwritten in place and carry no machine-readable date; the
+    # page text names the analysed dekad ("From September 21-30, the ITF ...").
+    match = None
+    try:
+        req = urllib.request.Request(PAGE_URL, headers={"User-Agent": "chc-skills/africa-itf"})
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+            page = resp.read().decode("utf-8", errors="replace")
+        match = re.search(r"From ([A-Z][a-z]+ \d{1,2}\s*[-\u2013]\s*\d{1,2}),", page)
+    except (urllib.error.URLError, OSError):
+        pass
+    if match:
+        print(f"Analysed dekad: {match.group(1)} (latest CPC analysis)", file=sys.stderr)
+    else:
+        print(
+            f"warning: could not read the analysed dekad from {PAGE_URL}; "
+            "check the date printed on the figure.",
+            file=sys.stderr,
+        )
     return output
 
 

@@ -1,0 +1,20 @@
+{
+  "template": {
+    "layout": {
+      "font": {"family": "Arial, Helvetica, sans-serif", "color": "#000000"},
+      "title": {"font": {"size": 20}}
+    }
+  },
+  "palettes": {
+    "kmsa": {
+      "colors": ["#ffffff", "#d1ffbe", "#55ff00", "#73dfff", "#00a9e6", "#ffaa00", "#ff5500"],
+      "bounds": [0, 1, 10, 20, 50, 70, 100, 100000],
+      "labels": ["< 1", "2 - 10", "11 - 20", "21 - 50", "51 - 70", "71 - 100", "> 100"]
+    }
+  },
+  "defaults": {"precip": "kmsa"},
+  "overlays": {
+    "admin1": {"line": {"color": "#4d4d4d", "width": 0.8}},
+    "borders": {"line": {"color": "#000000", "width": 1.4}}
+  }
+}

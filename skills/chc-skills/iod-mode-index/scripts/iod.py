@@ -1,14 +1,11 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core @ git+https://github.com/rhiza-research/weather-skills-core@main",
-#   "cftime>=1.6",
-#   "numpy",
+#   "weather-skills-core>=0.1.1",
 #   "xarray",
-#   "zarr",
 # ]
 # ///
-"""Compute the Indian Ocean Dipole Mode Index from a temperature-anomaly field."""
+"""Compute the Indian Ocean Dipole Mode Index from a gridded temperature-anomaly Zarr."""
 
 from __future__ import annotations
 
@@ -19,7 +16,7 @@ from weather_skills_core.standard_utils import bbox_subset, latitude_weights
 from weather_skills_core.units import dequantify_dataset
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.4"
+_SKILL_VERSION = "0.0.5"
 
 # Classic IOD / Dipole Mode Index boxes (Saji et al.).
 # West: 50–70E, 10S–10N. East: 90–110E, 10S–0.
@@ -44,7 +41,7 @@ def _box_mean(da: xr.DataArray, ds: xr.Dataset, bbox, lat_dim: str, lon_dim: str
     help="Pre-computed temperature anomaly variable (e.g. ts_anomaly, sst_anomaly).",
 )
 def iod(ds, variable, **kwargs):
-    """West − East Dipole Mode Index plus the two box-mean anomalies."""
+    """Compute the Indian Ocean Dipole Mode Index from a gridded temperature-anomaly Zarr."""
     if variable not in ds.data_vars:
         raise UsageError(
             f"variable {variable!r} not in input; available: {', '.join(ds.data_vars)}"

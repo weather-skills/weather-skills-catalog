@@ -1,81 +1,41 @@
 ---
 name: inspect-zarr
-description: Inspect a weather-skills standard dataset Zarr — print dimension sizes, coordinate values, and a data-variable summary (names, dims, dtype, units). Use when you need to see what is in a Zarr before clipping, selecting, aggregating, or plotting, or to confirm lat/lon/time coordinates after a fetch.
+description: "Print a short summary of a weather-skills Zarr: dimension sizes, coordinate values, and for each data variable its dims, dtype, units, key attributes, min/max/mean, finite and NaN counts, and a small sample of values. Use to see what a Zarr holds, or to check values and units after a fetch or transform."
 license: MIT
 compatibility: Requires Python 3.12 and uv.
 allowed-tools: Bash(uv run ${CLAUDE_SKILL_DIR}/scripts/inspect_zarr.py *)
 metadata:
+  version: "0.0.3"
   catalog-group: agent-tooling
 ---
 
 # inspect-zarr
 
-Read-only dump of a Zarr store's structure. Prints dimension sizes, every
-coordinate (with values), and a one-line summary of each data variable. It
-does not print data-variable arrays (those can be huge) and it does not write
-an output store.
-
-Use `provenance` when you need the `weather_skills_history` lineage rather than
-the grid itself.
-
-## When to use
-
-- Checking which dims and coordinates a fetch or transform produced.
-- Reading lat/lon/time (or `step` / `number`) values before `select`,
-  `clip-region`, `aggregate-temporal`, or `plot`.
-- Confirming units on data variables after `unit-convert` or
-  `convert-to-totals`, and whether `data_interval` / `aggregation_period` /
-  `aggregation_coverage` are present.
+Prints the structure of a Zarr and a bounded summary of its data; it writes nothing.
 
 ## Usage
 
-```
-uv run ${CLAUDE_SKILL_DIR}/scripts/inspect_zarr.py --input <in.zarr> \
-    [--format human|json] [--max-values N]
+```bash
+uv run ${CLAUDE_SKILL_DIR}/scripts/inspect_zarr.py -i IN.zarr [--format human|json] [--max-values N]
 ```
 
 ### Arguments
-
-- `--input`, `-i` — Zarr to inspect (`Dataset("any")`; any weather-skills
-  store, including precip totals).
-- `--format` — `human` (default) or `json`.
-- `--max-values` — maximum coordinate values printed per coordinate (default
-  24). Long axes print a head/tail preview and the total count. `0` prints
-  every value.
-
-Takes no `--output`. Nothing is written; stdout is the result.
+- `--input`, `-i` — any weather-skills Zarr (gridded, forecast, or station).
+- `--format` — `human` or `json`. Default: `human`.
+- `--max-values` — values shown per coordinate and per data-variable sample. Default: `24`. Longer coordinates show the first and last values plus the total count. `0` shows every coordinate value; data samples stay capped at 256.
 
 ### Output
+- `Dimensions`: each dim and its size.
+- `Coordinates`: name, dims, dtype, units, and values. Times print as dates; forecast `step` prints as durations (`7 days`, `0 days 03:00:00`).
+- `Data variables`: name, dims, dtype, shape, units; the attrs `long_name`, `standard_name`, `cell_methods`, `aggregation_period`, `data_interval` when set; `finite N/M`, `min`, `max`, `mean`; and a sample of the first finite values. Datetime variables get NaT counts and the date range, with no mean. An all-NaN variable shows `sample: (no finite values)`; a cut-off sample ends `(K of N finite cells)`.
+- `json`: the same as `{"dims", "coords", "data_vars"}`. Coord entries have `values`, `truncated`, `size`; variable entries have `attrs`, `n`, `n_finite`, `n_nan`, `min`, `max`, `mean`, `sample`, `sample_truncated`. NaN statistics are `null`.
 
-**human**
+### Notes
+- The whole input is read into memory for the statistics, so a large store is slow; output stays small. Subset a large store first if you only need part of it.
+- The processing history (`weather_skills_history`) is not printed.
 
-```
-Dimensions:
-  time: 2
-  latitude: 3
-  longitude: 4
-
-Coordinates:
-  time (time) datetime64[ns]
-    2026-01-01, 2026-01-02
-  latitude (latitude) float64 [degrees_north]
-    1, 2, 3
-  longitude (longitude) float64 [degrees_east]
-    10, 11, 12, 13
-
-Data variables:
-  precip (time, latitude, longitude) float64 2 × 3 × 4 [mm d-1]
-```
-
-A truncated coordinate line ends with `(N values)`.
-
-**json** — the same information as `dims`, `coords` (`values` / `truncated` /
-`size`), and `data_vars`. Use `provenance` for `weather_skills_history`.
-
-## Example
-
+### Example
 ```bash
-uv run ${CLAUDE_SKILL_DIR}/scripts/inspect_zarr.py -i /tmp/ecmwf.zarr
-uv run ${CLAUDE_SKILL_DIR}/scripts/inspect_zarr.py -i /tmp/ecmwf.zarr --format json
-uv run ${CLAUDE_SKILL_DIR}/scripts/inspect_zarr.py -i /tmp/imerg.zarr --max-values 0
+uv run ${CLAUDE_SKILL_DIR}/scripts/inspect_zarr.py -i chirps_kenya.zarr
 ```
+Prints the time, latitude and longitude axes of the Kenya CHIRPS grid and the range, NaN count, and a sample of `precip`.

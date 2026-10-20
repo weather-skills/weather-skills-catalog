@@ -1,44 +1,46 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core @ git+https://github.com/rhiza-research/weather-skills-core@main",
-#   "cftime",
+#   "weather-skills-core>=0.1.1",
 #   "fsspec",
 #   "aiohttp",
-#   "xarray",
-#   "zarr",
-#   "numpy",
+#   "cftime>=1.6",
 #   "netcdf4",
-#   "pint-xarray>=0.6",
+#   "numpy",
+#   "xarray",
 # ]
 # ///
-"""Fetch one CHC SubC MME outlook (7d, 15d, or 30d) and write a forecast Zarr."""
+"""Fetch one CHC SubC multi-model-ensemble outlook for an init date as a weather-skills Zarr."""
 
 from __future__ import annotations
 
 import json
 import re
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import numpy as np
 import xarray as xr
 from weather_skills_core import DataError, UsageError, weather_skill
 from weather_skills_core.cf import stamp_cf_attrs
-from weather_skills_core.standard_utils import bbox_subset
+from weather_skills_core.standard_utils import bbox_subset, ensure_normalized_longitude
 from weather_skills_core.units import stamp_precip_amounts, to_standard_units
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.5"
+_SKILL_VERSION = "0.0.6"
 
 # Public GCS mirror of data.chc.ucsb.edu (same paths under chc-mirror/).
 _BUCKET = "sheerwater-public-datalake"
 _MIRROR_PREFIX = "chc-mirror/experimental/SubC"
 _GCS_API = f"https://storage.googleapis.com/storage/v1/b/{_BUCKET}/o"
 _GCS_MEDIA = f"https://storage.googleapis.com/{_BUCKET}"
+SUBC_BASE = f"{_GCS_MEDIA}/{_MIRROR_PREFIX}"
+CHC_BASE = "https://data.chc.ucsb.edu/experimental/SubC"
+_USER_AGENT = "weather-skills/subc-mme-fetch"
 DEFAULT_WORKERS = 4
 _HTTP_TIMEOUT = 60
 
@@ -52,6 +54,16 @@ OUTLOOK_CHOICES = tuple(OUTLOOKS)
 
 # Six published global MME map variables (mean + anomaly each).
 VARIABLES: tuple[str, ...] = ("pr", "tas", "tasmax", "tasmin", "tdps", "ts")
+
+# Human long_name per variable (the colorbar label); anomalies append " anomaly".
+LONG_NAMES: dict[str, str] = {
+    "pr": "Precipitation",
+    "tas": "Near-surface air temperature",
+    "tasmax": "Maximum near-surface air temperature",
+    "tasmin": "Minimum near-surface air temperature",
+    "tdps": "Dewpoint temperature",
+    "ts": "Surface temperature",
+}
 
 KIND_MEAN = "mean"
 KIND_ANOM = "anom"
@@ -85,24 +97,35 @@ def _archive_list_prefix(folder: str, lead_tag: str, var: str) -> str:
     return f"{_MIRROR_PREFIX}/{folder}/global/archive/mme_mean_{var}_{lead_tag}_"
 
 
-def _open_remote(url: str) -> xr.Dataset:
-    """Open a SubC NetCDF from the public GCS mirror with xarray.
+def _candidate_urls(url: str) -> list[str]:
+    """GCS mirror first; CHC origin if the URL is on the mirror prefix."""
+    urls = [url]
+    if url.startswith(SUBC_BASE):
+        urls.append(CHC_BASE + url[len(SUBC_BASE) :])
+    return urls
 
-    Uses fsspec ``simplecache`` so netCDF4 opens a local materialized copy
-    (same pattern as the legacy CHC HTTPS archive).
+
+def _open_remote(url: str) -> xr.Dataset:
+    """Open a SubC NetCDF. GCS mirror first, then CHC origin.
+
+    Uses fsspec ``simplecache`` so netCDF4 opens a local materialized copy.
     """
     import fsspec
 
-    try:
-        path = fsspec.open_local(f"simplecache::{url}")
-    except FileNotFoundError as exc:
-        raise DataError(f"SubC archive file not found: {url}") from exc
-    except Exception as exc:
-        raise DataError(f"failed to open {url}: {exc}") from exc
-    try:
-        return xr.open_dataset(path, engine="netcdf4")
-    except Exception as exc:
-        raise DataError(f"failed to open {url}: {exc}") from exc
+    last_missing: Exception | None = None
+    for i, candidate in enumerate(_candidate_urls(url)):
+        opts: dict = {}
+        if i:
+            opts["https"] = {"client_kwargs": {"headers": {"User-Agent": _USER_AGENT}}}
+        try:
+            path = fsspec.open_local(f"simplecache::{candidate}", **opts)
+            return xr.open_dataset(path, engine="netcdf4")
+        except FileNotFoundError as exc:
+            last_missing = exc
+            continue
+        except Exception as exc:
+            raise DataError(f"failed to open {candidate}: {exc}") from exc
+    raise DataError(f"SubC archive file not found: {url}") from last_missing
 
 
 def _normalize_field(ds: xr.Dataset, *, kind: str, var: str) -> xr.DataArray:
@@ -210,7 +233,6 @@ def _resolve_vars(variable) -> list[str]:
     "--probe-latest",
     nargs="?",
     const="",
-    default=None,
     metavar="VAR",
     probe=True,
     help=(
@@ -220,21 +242,19 @@ def _resolve_vars(variable) -> list[str]:
         "all six variables. Does not download fields."
     ),
 )
-def fetch(date, outlook, bbox, variable, workers, **kwargs):
-    """Fetch one SubC MME outlook (7d / 15d / 30d) and write a forecast Zarr.
-
-    Each call returns a single-lead forecast envelope: ``time`` is the outlook
-    valid date (``--date`` init + outlook days) and ``step`` is the outlook
-    length. Archive init is kept as ``initialization_date``.
-    """
+def fetch(date, outlook, bbox, variable, workers, probe_latest, **kwargs):
+    """Fetch one CHC SubC multi-model-ensemble outlook for an init date as a weather-skills Zarr."""
+    # Each call returns a single-lead forecast envelope: scalar ``time`` is the
+    # init (``--date``), ``step`` is ``0 days`` (the window start), and the window
+    # length is each variable's ``aggregation_period``.
     if outlook not in OUTLOOKS:
         raise UsageError(
             f"unknown --outlook {outlook!r}; choose one of: {', '.join(OUTLOOK_CHOICES)}"
         )
     folder, lead_tag, outlook_days = OUTLOOKS[outlook]
 
-    if kwargs.get("probe_latest") is not None:
-        ident = kwargs["probe_latest"]
+    if probe_latest is not None:
+        ident = probe_latest
         if ident:
             if ident not in VARIABLES:
                 raise UsageError(
@@ -246,6 +266,22 @@ def fetch(date, outlook, bbox, variable, workers, **kwargs):
             vars_to_probe = list(VARIABLES)
         latest = _probe_latest(outlook, vars_to_probe)
         print(latest.isoformat() if latest is not None else "none")
+        if latest is not None:
+            # SubC publishes irregularly; tell the caller when the newest window is already over.
+            today = datetime.now(UTC).date()
+            valid = latest + timedelta(days=outlook_days)
+            age = (today - latest).days
+            if valid < today:
+                print(
+                    f"warning: latest {outlook} init {latest} is {age} days old; its window "
+                    f"ended {valid}, before today ({today}). It is not a forecast for the coming days.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"latest {outlook} init {latest} is {age} days old; window runs to {valid}.",
+                    file=sys.stderr,
+                )
         return
 
     if date is None:
@@ -255,9 +291,7 @@ def fetch(date, outlook, bbox, variable, workers, **kwargs):
     if workers < 1:
         raise UsageError("--workers must be >= 1")
 
-    jobs = [(KIND_MEAN, var) for var in vars_wanted] + [
-        (KIND_ANOM, var) for var in vars_wanted
-    ]
+    jobs = [(KIND_MEAN, var) for var in vars_wanted] + [(KIND_ANOM, var) for var in vars_wanted]
 
     results = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -268,26 +302,26 @@ def fetch(date, outlook, bbox, variable, workers, **kwargs):
         for fut in as_completed(futures):
             results.append(fut.result())
 
-    # Valid date = init + outlook. Keep classic forecast shape with step =
-    # outlook length measured from the archive init (stored in attrs).
+    # Same forecast shape as the other fetchers: scalar `time` is the init and
+    # `step` is the start of the one window it covers (0 days); the window length
+    # is the `aggregation_period` stamped below.
     valid = init + timedelta(days=outlook_days)
     data_vars = {}
     for kind, var, da in results:
         out_name = var if kind == KIND_MEAN else f"{var}_anomaly"
-        da = da.expand_dims(step=[np.timedelta64(outlook_days, "D")])
+        da = da.expand_dims(step=[np.timedelta64(0, "D")])
         data_vars[out_name] = da
 
     ds = xr.Dataset(data_vars)
-    # Returned forecast date is init + outlook (not the archive init).
-    ds = ds.assign_coords(time=np.datetime64(valid.isoformat(), "ns"))
+    ds = ds.assign_coords(time=np.datetime64(init.isoformat(), "ns"))
     ds["time"].attrs.update(
         standard_name="forecast_reference_time",
         axis="T",
-        long_name=f"SubC MME {outlook} outlook valid date (init + {outlook_days}d)",
+        long_name=f"SubC MME {outlook} outlook initialization",
     )
     ds["step"].attrs.update(
         standard_name="forecast_period",
-        long_name="outlook length (days from archive initialization)",
+        long_name="start of the outlook window (days from initialization)",
     )
     ds["latitude"].attrs.update(standard_name="latitude", units="degrees_north", axis="Y")
     ds["longitude"].attrs.update(standard_name="longitude", units="degrees_east", axis="X")
@@ -295,17 +329,36 @@ def fetch(date, outlook, bbox, variable, workers, **kwargs):
     ds = ds.sortby("latitude").sortby("longitude")
 
     if bbox is not None:
-        ds = bbox_subset(ds, bbox)
+        # Pad by just under half a grid cell so every 1-degree cell that overlaps the bbox
+        # is kept, not only those whose centre falls inside it (else a country's edge strip
+        # is lost). bbox_subset is inclusive, so a full half cell would also keep cells that
+        # only touch the box edge. The 1e-3 margin must exceed float32 coordinate resolution.
+        pad = float(abs(ds["latitude"].values[1] - ds["latitude"].values[0])) / 2 - 1e-3
+        north, west, south, east = bbox
+        ds = bbox_subset(ds, (north + pad, west - pad, south - pad, east + pad))
 
+    # Every field is one aggregate over the outlook window: precip a window sum (mm),
+    # temperatures a window mean. Stamp the window so plot / chc-plot-theme can size palettes.
+    period = f"{outlook_days} day"
     for name in ds.data_vars:
-        if name == "pr" or name.startswith("pr_"):
+        base = name.removesuffix("_anomaly")
+        long_name = LONG_NAMES[base] + (" anomaly" if name.endswith("_anomaly") else "")
+        ds[name].attrs["long_name"] = long_name
+        ds[name].attrs["comment"] = f"SubC MME {outlook} outlook, init {init.isoformat()}"
+        ds[name].attrs["aggregation_period"] = period
+        if base == "pr":
             ds[name].attrs.setdefault("units", "mm")
-            ds[name].attrs["long_name"] = f"SubC MME {outlook} {name}"
+            ds[name].attrs["cell_methods"] = "time: sum"
             # Source NetCDFs mislabel 7-day window sums as precipitation_flux.
             ds[name].attrs.pop("standard_name", None)
+        elif name.endswith("_anomaly"):
+            # A temperature anomaly is a difference: delta_degC keeps to_standard_units
+            # from applying the absolute K -> degC offset (-273.15).
+            ds[name].attrs["units"] = "delta_degC"
+            ds[name].attrs["cell_methods"] = "time: mean"
         else:
             ds[name].attrs.setdefault("units", "K")
-            ds[name].attrs["long_name"] = f"SubC MME {outlook} {name}"
+            ds[name].attrs["cell_methods"] = "time: mean"
 
     ds.attrs["Conventions"] = "CF-1.13"
     ds.attrs["weather_skills_source"] = "chc-subc-mme"
@@ -313,6 +366,7 @@ def fetch(date, outlook, bbox, variable, workers, **kwargs):
     ds.attrs["initialization_date"] = init.isoformat()
     ds.attrs["outlook_valid_date"] = valid.isoformat()
     stamp_cf_attrs(ds)
+    ds = ensure_normalized_longitude(ds, lon_dim="longitude")
     stamp_precip_amounts(ds)
     return to_standard_units(ds)
 
