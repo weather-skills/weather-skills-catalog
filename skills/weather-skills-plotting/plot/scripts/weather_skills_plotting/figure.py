@@ -106,24 +106,24 @@ def compile_figure(spec: dict, datasets: dict, *, theme: dict | None = None):
     items = []
     n_colored = 0
     traces = spec.get("data") or []
+    # UID-members / UID-band style the parts of band trace UID; they draw nothing alone.
+    banded = {t.get("uid"): t for t in traces if (t.get("meta") or {}).get("band") is not None}
+    parts: dict = {}
     for trace in traces:
-        # Arrows over a speed field take that field's selection unless they set their own.
-        if bind_of(trace) != "arrows":
-            continue
-        source = trace.setdefault("meta", {}).setdefault("source", {})
-        twin = next(
-            (
-                t
-                for t in traces
-                if bind_of(t) == "speed"
-                and ((t.get("meta") or {}).get("source") or {}).get("input") == source.get("input")
-            ),
-            None,
-        )
-        for key, value in (((twin or {}).get("meta") or {}).get("source") or {}).items():
-            if key in ("sel", "isel", "u", "v"):
-                source.setdefault(key, copy.deepcopy(value))
+        base, _, part = str(trace.get("uid") or "").rpartition("-")
+        if part in ("members", "band") and base in banded:
+            if part == "members" and (banded[base].get("meta") or {}).get("members") is False:
+                raise UsageError(
+                    f"uid {trace['uid']!r} styles the member lines of {base!r}, but its "
+                    "meta.members is false"
+                )
+            parts.setdefault(base, {})[part] = trace
+    skip = {id(p) for d in parts.values() for p in d.values()}
     for i, trace in enumerate(traces):
+        if id(trace) in skip:
+            continue
+        if trace.get("uid") in banded:
+            trace = {**trace, "meta": {**trace["meta"], "_parts": parts.get(trace["uid"], {})}}
         bound = None
         if bind_of(trace):
             bound = bind_trace(trace, ctx, f"data[{i}]", color=colorway[n_colored % len(colorway)])
@@ -159,19 +159,37 @@ def compile_figure(spec: dict, datasets: dict, *, theme: dict | None = None):
 # ---------------------------------------------------------------- trace merge
 
 
-def _concrete(spec_trace: dict, generated: dict, uid: str, *, user_style=True) -> dict:
-    """Generated arrays with the user's own trace keys on top (user wins)."""
+def _style(trace: dict) -> dict:
+    return {k: v for k, v in trace.items() if k not in ("meta", "uid", "xaxis", "yaxis")}
+
+
+def _concrete(spec_trace: dict, generated: dict, uid: str) -> dict:
+    """Generated arrays with the user's own trace keys on top (user wins).
+
+    A band trace draws three parts: its own uid is the mean line, and the spec
+    traces ``UID-members`` / ``UID-band`` style the member lines and the shading.
+    """
     gen = dict(generated)
     suffix = gen.pop("uid_suffix", None)
+    meta = spec_trace.get("meta") or {}
     out = {"type": spec_trace.get("type") or "scatter"}
-    if user_style and not str(suffix or "").startswith("band"):
-        user = {k: v for k, v in spec_trace.items() if k not in ("meta", "uid", "xaxis", "yaxis")}
+    if meta.get("band") is not None and suffix in ("members", "band-low", "band"):
+        style = _style(
+            (meta.get("_parts") or {}).get("members" if suffix == "members" else "band", {})
+        )
+        if suffix == "band-low":
+            # The lower edge only carries the outline; the fill and legend are the band's.
+            style = {k: v for k, v in style.items() if k == "line"}
+        elif suffix == "members" and "name" in style:
+            # A named trace has a legend entry, as in Plotly.
+            style = {"showlegend": True, **style}
+        out.update(deep_merge(gen, style))
+    else:
+        user = _style(spec_trace)
         if "=" in str(suffix or ""):
             # One trace per along member: the member's name, not the input's.
             user.pop("name", None)
         out.update(deep_merge(gen, user))
-    else:
-        out.update(gen)
     out["uid"] = safe_uid(f"{uid}-{suffix}" if suffix else uid)
     return out
 
@@ -210,13 +228,14 @@ def _lift_color(spec_trace: dict, color_key: str) -> dict:
 
 def _uncolored(spec_trace: dict) -> bool:
     """No color scale to show: a contour drawn as plain lines (``contours.coloring: none``),
-    or a scatter drawn without markers (``mode: "text"``, ``"lines"``)."""
+    or a scatter drawn without markers (``mode: "text"``, ``"lines"``) or with the
+    spec's own ``marker.color`` (``"black"``: every dot that color, as in Plotly)."""
     if spec_trace.get("type") == "contour":
         return (spec_trace.get("contours") or {}).get("coloring") == "none"
+    if spec_trace.get("type") not in ("scatter", "scattergl"):
+        return False
     mode = spec_trace.get("mode")
-    return (
-        spec_trace.get("type") in ("scatter", "scattergl") and bool(mode) and "markers" not in mode
-    )
+    return (bool(mode) and "markers" not in mode) or ("color" in (spec_trace.get("marker") or {}))
 
 
 def _resolve_coloraxis(name, members, user_axis, ctx, *, contour_traces):
@@ -282,6 +301,11 @@ def _resolve_coloraxis(name, members, user_axis, ctx, *, contour_traces):
                 raw = _get_path(tr, bound.color_key)
                 slots, scale = discretize(raw, palette)
                 _set_path(tr, bound.color_key, slots)
+                if bound.color_key == "z":
+                    # z now holds class slots: hover reads the raw values instead.
+                    tr["customdata"] = raw
+                    if "hovertemplate" in tr:
+                        tr["hovertemplate"] = tr["hovertemplate"].replace("%{z", "%{customdata")
         _, scale = discretize(finite, palette)
         axis.update(colorscale=scale["colorscale"], cmin=scale["cmin"], cmax=scale["cmax"])
         axis["colorbar"].update(tickvals=scale["tickvals"], ticktext=scale["ticktext"])
@@ -294,7 +318,12 @@ def _resolve_coloraxis(name, members, user_axis, ctx, *, contour_traces):
         return axis
     if palette:
         axis["colorscale"] = continuous_colorscale(palette["colors"])
-    if diverging and not stretch:
+    if "cmid" in user and not stretch:
+        # Plotly's zmid / cmid: the scale centres on it, wide enough for the data.
+        mid = float(user["cmid"])
+        m = max(abs(lo - mid), abs(hi - mid))
+        lo, hi = mid - m, mid + m
+    elif diverging and not stretch:
         m = max(abs(lo), abs(hi))
         lo, hi = -m, m
     elif not stretch and first.color_da is not None and is_sea_level_pressure(first.color_da):
@@ -316,6 +345,20 @@ def _resolve_coloraxis(name, members, user_axis, ctx, *, contour_traces):
         lo, hi = lo - 1, hi + 1
     axis.setdefault("cmin", lo)
     axis.setdefault("cmax", hi)
+    lo, hi = float(user.get("cmin", lo)), float(user.get("cmax", hi))
+    for tr in contour_traces:
+        contours = tr.setdefault("contours", {})
+        if tr.get("autocontour") or {"start", "end", "size"} & contours.keys() or hi <= lo:
+            continue
+        # Plotly picks levels from each panel's own values, so panels and animation
+        # frames would disagree; take ~ncontours round levels across the colour range.
+        raw = (hi - lo) / tr.get("ncontours", 15)
+        mag = 10 ** math.floor(math.log10(raw))
+        size = next(s * mag for s in (1, 2, 2.5, 5, 10) if s * mag >= raw)
+        tr["autocontour"] = False
+        contours.update(
+            start=math.floor(lo / size) * size, end=math.ceil(hi / size) * size, size=size
+        )
     return axis
 
 
@@ -335,8 +378,6 @@ def _input_label(ctx, trace):
 
     from weather_skills_core.decorator import INPUT_PATH_ATTR
 
-    if trace.get("name"):
-        return str(trace["name"])
     source = (trace.get("meta") or {}).get("source") or {}
     if source.get("input") is not None and not str(source["input"]).isdigit():
         return str(source["input"])  # the NAME from -i PATH=NAME
@@ -368,15 +409,24 @@ def _assemble_map(items, user_layout, lmeta, ctx):
             b for _, _, b in groups[g] if b is not None and not b.static and len(b.panels) > 1
         ]
         if faceted:
+            # Layers on one map draw the same times: never pair different dates silently.
             keys = [p.key for p in faceted[0].panels]
+            first = [p.title for p in faceted[0].panels]
             for b in faceted[1:]:
-                have = {_key(p.key) for p in b.panels}
-                keys = [k for k in keys if _key(k) in have]
-            if not keys:
-                raise UsageError(
-                    "layered traces share no time/step values to draw together; select one "
-                    "time per layer (meta.source.isel / sel), or aggregate first"
-                )
+                if [_key(p.key) for p in b.panels] != [_key(k) for k in keys]:
+                    raise UsageError(
+                        f"layered traces show different times/steps ({', '.join(map(str, first))} "
+                        f"vs {', '.join(str(p.title) for p in b.panels)}); select the same ones "
+                        "in each layer (meta.source.isel / sel)"
+                    )
+            for _, st, b in groups[g]:
+                # A layer with no date (terrain, a mask) may sit under every panel.
+                if b is not None and not b.static and len(b.panels) == 1 and b.panels[0].title:
+                    raise UsageError(
+                        f"layer {st.get('uid')!r} is one map ({b.panels[0].title}) but another "
+                        f"layer has {len(keys)} panels ({', '.join(map(str, first))}); select "
+                        "the same times in each layer (meta.source.isel / sel)"
+                    )
             plan.append(keys)
         else:
             plan.append([None])
@@ -432,7 +482,9 @@ def _assemble_map(items, user_layout, lmeta, ctx):
                 extents[p] = bound.extent
             pid = f"{uid}-p{p + 1}" if n > 1 else uid
             for j, gen in enumerate(part.traces):
-                tr = _concrete(spec_trace, gen, pid if j == 0 else f"{pid}-{j}")
+                tr = _concrete(
+                    spec_trace, gen, pid if j == 0 or "uid_suffix" in gen else f"{pid}-{j}"
+                )
                 panel_traces[p].append((_MAP_RANK[bind_of(spec_trace)], tr, spec_trace, bound))
         if extents[p] is None:
             extents[p] = next(
@@ -441,7 +493,7 @@ def _assemble_map(items, user_layout, lmeta, ctx):
         if extents[p] is None:
             raise UsageError("a map panel has no data extent; set layout.meta.geo.bbox")
     if len(order) > 1:
-        # Side by side, a panel is named for its dataset (trace name, else file name),
+        # Side by side, a panel is named for its input (-i NAME, else file name),
         # and keeps its date too when the panels show different dates.
         dates = [t for t in panel_titles if t]
         differ = len(set(dates)) > 1
@@ -498,7 +550,16 @@ def _assemble_map(items, user_layout, lmeta, ctx):
                 key = (
                     json.dumps(quantity),
                     json.dumps((spec_trace.get("meta") or {}).get("palette"), sort_keys=True),
-                    json.dumps(spec_trace.get("colorscale"), sort_keys=True),
+                    # The trace's own scale and limits apply to that trace, not to every
+                    # map of the same quantity (colorbar / showscale still style the shared bar).
+                    json.dumps(
+                        {
+                            k: v
+                            for k, v in _lift_color(spec_trace, bound.color_key).items()
+                            if k not in ("colorbar", "showscale")
+                        },
+                        sort_keys=True,
+                    ),
                     bound.color_da is not None and is_precip_anomaly(bound.color_da),
                 )
                 name = auto.get(key)
@@ -587,21 +648,37 @@ def _assemble_map(items, user_layout, lmeta, ctx):
     aspect = float(np.median([(e[1] - e[0]) / max(e[3] - e[2], 1e-6) for e in extents if e]))
     grid_in = user_layout.pop("grid", None) or {}
     rows, cols = choose_grid(n, aspect, grid_in.get("rows"), grid_in.get("columns"))
+    # Trace-level colorbar / showscale lift onto the trace's color axis, under the
+    # spec's layout.<coloraxis>. On a shared axis one trace asking for the bar shows
+    # it: showscale false on the other traces only means "not drawn from me".
+    lifted_of, asked = {}, {}
+    for name, members in axis_members.items():
+        lifted = {}
+        for spec_trace, bound, _ in members:
+            lifted = deep_merge(lifted, _lift_color(spec_trace, bound.color_key))
+        if any(st.get("showscale") is True for st, _, _ in members):
+            lifted["showscale"] = True
+        lifted_of[name] = lifted
+        asked[name] = deep_merge(lifted, user_layout.get(name) or {})
     panels_of = {}
     for name in axis_members:
-        if (user_layout.get(name) or {}).get("showscale") is False:
+        if asked[name].get("showscale") is False:
             continue
         panels_of[name] = [
             p for p in range(n) for _, _, st, _ in panel_traces[p] if axis_of.get(id(st)) == name
         ]
     panels_of = dict(sorted(panels_of.items(), key=lambda item: min(item[1])))
-    mode = colorbar_mode(panels_of, cols)
+    # A bar the spec positions itself (colorbar x or y) stays where it was put; only
+    # the other bars are placed beside or under the maps.
+    placed = {name for name in panels_of if {"x", "y"} & (asked[name].get("colorbar") or {}).keys()}
+    auto_of = {name: ps for name, ps in panels_of.items() if name not in placed}
+    placed_h = {name for name in placed if asked[name]["colorbar"].get("orientation") == "h"}
+    mode = colorbar_mode(auto_of, cols)
     if mode in ("right", "rows") and aspect > WIDE_MAP:
         # A strip (a Pacific band, a polar belt) is too short for a vertical bar's title.
         mode = "below"
     if mode in ("right", "rows") and any(
-        ((user_layout.get(name) or {}).get("colorbar") or {}).get("orientation") == "h"
-        for name in panels_of
+        (asked[name].get("colorbar") or {}).get("orientation") == "h" for name in auto_of
     ):
         # A horizontal bar asked for in the spec gets room under the maps.
         mode = "below"
@@ -611,11 +688,11 @@ def _assemble_map(items, user_layout, lmeta, ctx):
         aspect,
         titled=title_lines(user_layout.get("title")),
         panel_titles=any(panel_titles),
-        right=bool(panels_of) and mode in ("right", "rows"),
-        below=bool(panels_of) and mode in ("columns", "below"),
+        right=(bool(auto_of) and mode in ("right", "rows")) or bool(placed - placed_h),
+        below=(bool(auto_of) and mode in ("columns", "below")) or bool(placed_h),
         user={**user_layout, "grid": grid_in},
     )
-    slots = place_colorbars(mode, panels_of, domains)
+    slots = place_colorbars(mode, auto_of, domains)
     # No-data cells show the plot background (the theme's maps style): a neutral grey,
     # not the template's tint, darker than a diverging zero or a dry class, so a missing
     # cell never reads as zero.
@@ -669,12 +746,9 @@ def _assemble_map(items, user_layout, lmeta, ctx):
                     bar["ticktext"] = [
                         t if i % k == 0 else "" for i, t in enumerate(bar["ticktext"])
                     ]
-        else:
+        elif name not in placed:
             axis["showscale"] = False
-        lifted = {}
-        for spec_trace, bound, _ in members:
-            lifted = deep_merge(lifted, _lift_color(spec_trace, bound.color_key))
-        layout[name] = deep_merge(axis, lifted)
+        layout[name] = deep_merge(axis, lifted_of[name])
 
     # Overlays, then assemble each panel's traces in draw order.
     settings = overlay_settings(lmeta.get("overlays"))
@@ -744,26 +818,19 @@ def _key(value):
 
 
 def _assemble_chart(items, user_layout):
-    grid = user_layout.get("grid") or {}
-    cells = (grid.get("rows") or 1) * (grid.get("columns") or 1)
-    explicit = any(t.get("xaxis") or t.get("yaxis") for _, t, _ in items)
-    coupled = grid.get("pattern") == "coupled"
     data = []
     layout = {}
     axis_titles: dict[str, dict] = {}
-    for k, (i, spec_trace, bound) in enumerate(items):
+    for i, spec_trace, bound in items:
         uid = spec_trace.get("uid") or f"trace{i}"
         xa, ya = spec_trace.get("xaxis") or "x", spec_trace.get("yaxis") or "y"
-        if cells > 1 and not explicit and k < cells:
-            xa = "x" if coupled and grid.get("columns", 1) == 1 else f"x{axis_suffix(k)}"
-            ya = f"y{axis_suffix(k)}"
         if bound is None:
             tr = copy.deepcopy(spec_trace)
             tr["uid"] = safe_uid(uid)
             data.append(tr)
             continue
         for j, gen in enumerate(bound.panels[0].traces):
-            tr = _concrete(spec_trace, gen, uid if j == 0 else f"{uid}-{j}")
+            tr = _concrete(spec_trace, gen, uid if j == 0 or "uid_suffix" in gen else f"{uid}-{j}")
             if tr.get("type") != "barpolar":
                 tr["xaxis"], tr["yaxis"] = xa, ya
             data.append(tr)
@@ -786,10 +853,11 @@ def _assemble_chart(items, user_layout):
     # Room above the plot only for what is there: a title, a legend row.
     lines = title_lines(user_layout.get("title") or layout.get("title"))
     named = [tr for tr in data if tr.get("name") and tr.get("showlegend") is not False]
-    top = (20, 60, 84)[lines]
+    top = 20 if not lines else 60 + 24 * (lines - 1)
     # Legend order follows the inputs even with filled bands (Plotly reverses those).
     layout["legend"] = {**(layout.get("legend") or {}), "traceorder": "normal"}
-    if len(named) < 2:
+    wants_legend = "showlegend" in user_layout or any(tr.get("showlegend") for tr in data)
+    if len(named) < 2 and not wants_legend:
         layout["showlegend"] = False
     elif not any(tr.get("type") == "barpolar" for tr in data):
         layout["legend"].update(orientation="h", x=0, xanchor="left", y=1.02, yanchor="bottom")
@@ -798,6 +866,16 @@ def _assemble_chart(items, user_layout):
         entries_px = sum(7 * len(str(tr["name"])) + 45 for tr in named)
         top += 24 * max(1, math.ceil(entries_px / max(plot_px, 200)))
     layout["margin"] = {"t": top}
+    if lines:
+        # Plotly centres the title in the top margin; a tall margin (legend rows) would push
+        # it down into the legend. Pin it to the top instead (a spec title.y still wins).
+        layout["title"] = {
+            **(layout.get("title") or {}),
+            "yref": "container",
+            "y": 1,
+            "yanchor": "top",
+            "pad": {"t": 12},
+        }
     for name, axis in user_layout.items():
         if name.startswith("yaxis") and isinstance(axis, dict) and axis.get("overlaying"):
             # Plotly syncs an overlaid axis to the left grid (ticks at 1.01, 2.02, …);

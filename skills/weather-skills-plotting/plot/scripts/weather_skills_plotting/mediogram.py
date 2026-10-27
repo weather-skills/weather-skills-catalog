@@ -5,8 +5,9 @@ Used by ``plot --mediogram -i FORECAST -i MCLIMATE``.
 
 import numpy as np
 from weather_skills_core import UsageError
-from weather_skills_core.cf import auto_variable, cf_dim
+from weather_skills_core.cf import cf_dim
 
+from weather_skills_plotting.bind import pick_variable
 from weather_skills_plotting.cli import skeleton
 from weather_skills_plotting.kinds import is_precip
 from weather_skills_plotting.labels import (
@@ -40,7 +41,8 @@ def _box(uid, name, color, source):
 
 def _variable(ds, user, uid):
     trace = next((t for t in user.get("data") or [] if t.get("uid") == uid), {})
-    return ((trace.get("meta") or {}).get("source") or {}).get("variable") or auto_variable(ds)
+    name = ((trace.get("meta") or {}).get("source") or {}).get("variable")
+    return pick_variable(ds, name, f"the {uid!r} trace's meta.source")
 
 
 def build_mediogram_spec(ds, spec):
@@ -113,16 +115,8 @@ def build_mediogram_spec(ds, spec):
             "ticktext": [format_plot_date(d, year=False) for d in days],
         }
         suffix = f" · init {format_plot_date(init)}"
-    # A user title keeps the place and init date, as the verification grid keeps the week.
-    user_layout = user.get("layout") or {}
-    user_title = user_layout.get("title") or {}
-    user_title = user_title if isinstance(user_title, dict) else {"text": user_title}
-    if user_title.get("text"):
-        title = f"{user_title['text']} · {where}{suffix}"
-        # Only the text changes: a subtitle or font in the user's title stays.
-        user = {**user, "layout": {**user_layout, "title": {**user_title, "text": title}}}
-    else:
-        title = f"Mediogram: {qty} at {where}{suffix}"
+    # The default title; a spec title replaces it as given.
+    title = f"Mediogram: {qty} at {where}{suffix}"
     layout = {"title": {"text": title}, "boxmode": "group", "scattermode": "group", "xaxis": xaxis}
     if is_precip(da):
         layout["yaxis"] = {"rangemode": "nonnegative"}

@@ -10,9 +10,10 @@ import sys
 
 import numpy as np
 from weather_skills_core import UsageError
-from weather_skills_core.cf import auto_variable, cf_dim
+from weather_skills_core.cf import cf_dim
 from weather_skills_core.units import units_equal, variable_units
 
+from weather_skills_plotting.bind import pick_variable
 from weather_skills_plotting.cli import skeleton, warn
 from weather_skills_plotting.geodata import plain
 from weather_skills_plotting.kinds import aggregation_days, is_precip
@@ -133,17 +134,12 @@ def build_verify_spec(obs, forecast, verify, spec):
         **{f"verify{i}": v for i, v in enumerate(verifies, 1)},
     }
 
-    obs_var = _user_variable(user, "obs") or auto_variable(obs)
+    obs_var = pick_variable(obs, _user_variable(user, "obs"), 'the "obs" trace\'s meta.source')
     obs_da = _single_map(obs, obs_var, "--obs")
     fc_vars = []
     for i, fc in enumerate(forecasts, 1):
-        var = _user_variable(user, f"forecast{i}") or (
-            obs_var if obs_var in fc else auto_variable(fc)
-        )
-        if var not in fc:
-            raise UsageError(
-                f"--forecast {i} has no variable {var!r}; available: {', '.join(fc.data_vars)}"
-            )
+        uid = f"forecast{i}"
+        var = pick_variable(fc, _user_variable(user, uid), f"the {uid!r} trace's meta.source")
         fc_vars.append(var)
         _single_map(fc, var, f"--forecast {i}")
         u_fc, u_obs = variable_units(fc[var]), variable_units(obs_da)
@@ -275,17 +271,11 @@ def build_verify_spec(obs, forecast, verify, spec):
             "no verifying-week date found (select drops the time coordinate); put the week "
             'in the title, e.g. --spec \'{"layout": {"title": {"text": "IMERG vs ENS, 3–9 Aug"}}}\''
         )
-    user_layout = user.get("layout") or {}
-    user_title = user_layout.get("title") or {}
-    user_title = user_title if isinstance(user_title, dict) else {"text": user_title}
-    text = user_title.get("text")
-    title = week if not text else (f"{text} · {week}" if week and week not in text else text)
+    # The week is the default title; a spec title replaces it as given.
+    title = week
     grid = {"rows": 1, "columns": 3} if single else {"rows": 2, "columns": cols}
     layout = {"grid": grid, "annotations": annotations, "coloraxis2": axis2}
     if title:
         layout["title"] = {"text": title}
     base = skeleton("plot --verify", datasets, data, layout)
-    if text:
-        # Only the text changes: a subtitle or font in the user's title stays.
-        user = {**user, "layout": {**user_layout, "title": {**user_title, "text": title}}}
     return merge_spec(base, user), datasets

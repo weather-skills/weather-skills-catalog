@@ -103,12 +103,20 @@ def export(fig, output, *, datasets=None, scale=None):
         import plotly.io as pio
 
         # An animation opens paused on its first frame; the viewer presses Play.
+        # The scroll wheel zooms, which Plotly leaves off by default.
         pio.write_html(
             _float32(fig.to_plotly_json()),
             output,
             include_plotlyjs=True,
             full_html=True,
             auto_play=False,
+            # No Plotly Cloud upload or Plotly logo link.
+            config={
+                "responsive": True,
+                "scrollZoom": True,
+                "showSendToCloud": False,
+                "displaylogo": False,
+            },
         )
         return output
     import plotly.io as pio

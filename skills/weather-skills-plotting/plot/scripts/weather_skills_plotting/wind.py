@@ -121,8 +121,14 @@ def resolve_uv(ds, u_variable, v_variable):
         return u_cf[0], v_cf[0]
     present = set(names)
     matches = [(u, v) for u, v in _UV_NAME_PAIRS if u in present and v in present]
-    if matches:
+    if len(matches) == 1 and len(u_cf) <= 1 and len(v_cf) <= 1:
         return matches[0]
+    if matches or len(u_cf) > 1 or len(v_cf) > 1:
+        found = ", ".join(f"{u}/{v}" for u, v in matches) or ", ".join(u_cf + v_cf)
+        raise UsageError(
+            f"several wind components ({found}); set meta.source.u and meta.source.v "
+            "to the pair to draw"
+        )
     raise UsageError(
         "u/v plot needs eastward (u) and northward (v) wind components; "
         f"could not auto-detect them in {names}. Set meta.source.u and meta.source.v; u and v "

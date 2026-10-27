@@ -22,7 +22,6 @@ from weather_skills_core.standard_utils import ensure_normalized_longitude, poly
 from weather_skills_core.units import (
     STANDARD,
     classify_variable,
-    to_standard_units,
     units_equal,
     ureg,
     variable_units,
@@ -156,23 +155,24 @@ def _display(ds, variable):
     da = ds[variable]
     units = variable_units(da)
     try:
-        mm_rate = str(ureg.Unit(units)).startswith("millimeter / ")
+        parsed = str(ureg.Unit(units))
     except Exception:  # noqa: BLE001 — no or unparseable units
-        mm_rate = False
+        parsed = ""
+    mm_rate = parsed.startswith("millimeter / ")
     kind = classify_variable(variable, units=units, standard_name=da.attrs.get("standard_name"))
+    # Values are drawn in the file's own units (K stays K, Pa stays Pa): zmin, contour
+    # levels and palette edges in a spec mean those units. unit-convert changes them.
     if mm_rate and kind == "precip":
-        # A rate already in mm per hour, day, ... keeps the units it was written in
-        # (unit-convert's choice), so class edges in a spec palette mean those units.
+        # Tag a mm rate as precipitation so it gets the rainfall palette.
         ds = ds.copy(deep=False)
         ds[variable] = da.copy(deep=False)
         ds[variable].attrs["standard_name"] = STANDARD["precip"]["standard_name"]
-    else:
-        try:
-            ds = to_standard_units(ds, variables=[variable])
-        except UsageError:
-            # Totals or anomalies can carry a rate/temperature standard_name that
-            # the standard-units table would force into an incompatible target.
-            pass
+    elif kind in ("precip", "precip_amount") and parsed and not parsed.startswith("millimeter"):
+        print(
+            f"Note: {variable!r} is drawn in its own units ({units}); the rainfall colors are "
+            "classed in mm, so run unit-convert first for mm or mm day-1",
+            file=sys.stderr,
+        )
     period = da.attrs.get("aggregation_period")
     days = aggregation_days(da)
     if kind == "precip" and period and (days is None or days >= 1):
@@ -185,25 +185,15 @@ def _display(ds, variable):
     return ds
 
 
-def _variable(ds, name, loc):
+def pick_variable(ds, name, loc):
+    """``name``, or the file's only data variable; several and none named is an error."""
     variable = name
-    if not variable and len(ds.data_vars) > 1:
-        # Several fields and none named: rainfall if there is one, and say so.
-        precip = [
-            v
-            for v in ds.data_vars
-            if classify_variable(
-                str(v),
-                units=variable_units(ds[v]),
-                standard_name=ds[v].attrs.get("standard_name"),
-            )
-            in ("precip", "precip_amount")
-        ]
-        variable = precip[0] if precip else auto_variable(ds)
-        print(
-            f"Note: {loc}: drawing {variable!r} of {', '.join(map(str, ds.data_vars))}; "
-            f"set {loc}.variable to choose",
-            file=sys.stderr,
+    fields = [v for v in ds.data_vars if "grid_mapping_name" not in ds[v].attrs]
+    if not variable and len(fields) > 1:
+        # Guessing among several fields draws the wrong one without a word.
+        raise UsageError(
+            f"{loc}.variable is not set and the data holds {', '.join(map(str, fields))}; "
+            f"set {loc}.variable to the one to draw"
         )
     variable = variable or auto_variable(ds)
     if not variable or variable not in ds:
@@ -302,7 +292,7 @@ def _polygon(ctx: Context, source: dict):
 def select(ctx: Context, source: dict, loc: str, *, variable=None):
     """The source's variable after units, ``isel``/``sel`` and the geo subset."""
     ds = _dataset(ctx, source, loc)
-    name = _variable(ds, variable or source.get("variable"), loc)
+    name = pick_variable(ds, variable or source.get("variable"), loc)
     ds = _display(ds, name)
     da = _sel(plain(ds[name]), source, loc)
     return _subset(ctx, source, da), ds
@@ -420,7 +410,6 @@ def bind_field(trace, meta, ctx, loc, *, speed=False):
     if speed:
         ds = _dataset(ctx, source, f"{loc}.source")
         u_name, v_name = resolve_uv(ds, source.get("u"), source.get("v"))
-        ds = to_standard_units(ds, variables=[u_name, v_name])
         u_da = _subset(ctx, source, _sel(plain(ds[u_name]), source, f"{loc}.source"))
         v_da = _subset(ctx, source, _sel(plain(ds[v_name]), source, f"{loc}.source"))
         da = wind_speed_da(u_da, v_da)
@@ -438,15 +427,12 @@ def bind_field(trace, meta, ctx, loc, *, speed=False):
     panels, values = [], []
     units = format_units_for_display(variable_units(da))
     hover = (
-        f"lat %{{y:.2f}}, lon %{{x:.2f}}: %{{customdata:.4g}}{' ' + units if units else ''}"
-        "<extra></extra>"
+        f"lat %{{y:.2f}}, lon %{{x:.2f}}: %{{z:.4g}}{' ' + units if units else ''}<extra></extra>"
     )
     for key, ptitle, part in _slices(da, fdim):
         z = np.asarray(part.values, dtype=float)
         values.append(z)
-        panels.append(
-            Panel([{"x": x, "y": y, "z": z, "customdata": z, "hovertemplate": hover}], ptitle, key)
-        )
+        panels.append(Panel([{"x": x, "y": y, "z": z, "hovertemplate": hover}], ptitle, key))
     return Bound(
         panels,
         is_map=True,
@@ -481,7 +467,6 @@ def bind_arrows(trace, meta, ctx, loc):
     opts = meta.get("arrows") or {}
     ds = _dataset(ctx, source, f"{loc}.source")
     u_name, v_name = resolve_uv(ds, source.get("u"), source.get("v"))
-    ds = to_standard_units(ds, variables=[u_name, v_name])
     u_units, v_units = variable_units(ds[u_name]), variable_units(ds[v_name])
     if u_units and v_units and not units_equal(u_units, v_units):
         raise UsageError(f"u units {u_units!r} do not match v units {v_units!r}")
@@ -587,6 +572,9 @@ def bind_points(trace, meta, ctx, loc):
         )
     fdim = _facet_dim(meta, da, (pdim,), loc)
     _leftover_error(da, {pdim, fdim}, "station points", loc)
+    if da.attrs.get("extremum_kind") in ("high", "low"):
+        # Highs / lows from local-extrema print as H / L with the central value.
+        fill_defaults(trace, ctx.theme["styles"][f"{da.attrs['extremum_kind']}s"])
     if fdim:
         da = da.transpose(fdim, pdim)
     lat = np.asarray(da[cf_dim(da, "latitude")].values, dtype=float)
@@ -594,7 +582,12 @@ def bind_points(trace, meta, ctx, loc):
     if _wrapped(ctx):
         # Same continuous axis as the wrapped grid: 150E..80W is 150..280.
         lon = ((lon - ctx.bbox[1]) % 360.0) + ctx.bbox[1]
-    names = [str(v) for v in da[pdim].values]
+    ids = [str(v) for v in da[pdim].values]
+    names = ids
+    if "name" in da.coords and da["name"].dims == (pdim,):
+        # A text label reads the station name ("Kibera"); hover keeps the id too.
+        names = [str(n).strip() or i for i, n in zip(ids, da["name"].values, strict=True)]
+    hover_names = [i if n == i else f"{i} {n}" for i, n in zip(ids, names, strict=True)]
     units = format_units_for_display(variable_units(da))
     panels, values = [], []
     for key, ptitle, part in _slices(da, fdim):
@@ -620,6 +613,7 @@ def bind_points(trace, meta, ctx, loc):
                         "x": lon[keep],
                         "y": lat[keep],
                         "text": [n for n, k in zip(names, keep, strict=True) if k],
+                        "hovertext": [n for n, k in zip(hover_names, keep, strict=True) if k],
                         "customdata": vals[keep],
                         # An outline keeps a station visible when its class is white.
                         # A few stations read as dots, not specks; a dense network stays small.
@@ -631,7 +625,7 @@ def bind_points(trace, meta, ctx, loc):
                             # ring is the < 1 mm class).
                             "symbol": np.where(finite[keep], "circle", "x").tolist(),
                         },
-                        "hovertemplate": "%{text}: %{customdata:.4g}"
+                        "hovertemplate": "%{hovertext}: %{customdata:.4g}"
                         + (f" {units}" if units else "")
                         + "<extra></extra>",
                         "showlegend": False,
@@ -822,13 +816,15 @@ def bind_series(trace, meta, ctx, loc, *, color=None):
                     "fill": "tonexty",
                     # The series color, translucent (trace opacity does not reach a fill).
                     "fillcolor": _rgba(col, 0.25),
-                    "uid_suffix": "band-high",
+                    "uid_suffix": "band",
                     # The legend says what the shading is.
                     "showlegend": True,
-                    "name": f"{band[0]:g}–{band[1]:g}%",
+                    "name": "min–max" if list(band) == [0, 100] else f"{band[0]:g}–{band[1]:g}%",
                 },
                 {
                     **base,
+                    # The mean is the trace's own uid: its spec style is the mean's.
+                    "uid_suffix": "",
                     # The legend says the bold line is the mean, not one member.
                     "name": trace.get("name")
                     or f"{label} {'ensemble mean' if along == 'number' else 'mean'}",
@@ -922,22 +918,66 @@ def seasonal_dates(coord, loc):
 def bind_xy(trace, meta, ctx, loc):
     """One variable against another from the same input: a point per shared position."""
     source = meta.get("source") or {}
-    x_da, _ = select(ctx, source, f"{loc}.source", variable=meta.get("x"))
-    y_da, _ = select(ctx, source, f"{loc}.source", variable=meta.get("y"))
+    ds = _dataset(ctx, source, f"{loc}.source")
+    picked = []
+    for name in (meta.get("x"), meta.get("y")):
+        # isel / sel reach only the side that has the dim: a county coordinate has no
+        # time to pick. A dim the file lacks stays, so its "not in the data" error shows.
+        dims = ds[name].dims if name in ds.variables else ds.dims
+        own = dict(source)
+        for key in ("isel", "sel"):
+            if source.get(key):
+                own[key] = {d: v for d, v in source[key].items() if d in dims or d not in ds.dims}
+        picked.append(select(ctx, own, f"{loc}.source", variable=name)[0])
+    x_da, y_da = picked
     if set(x_da.dims) != set(y_da.dims):
         raise UsageError(
             f"{loc}: x {meta.get('x')!r} has dims {list(x_da.dims)} but y {meta.get('y')!r} has "
             f"{list(y_da.dims)}; select one value of the extra dims with {loc}.source.isel / sel"
         )
     y_da = y_da.transpose(*x_da.dims)
-    xv = np.asarray(x_da.values, dtype=float).ravel()
-    yv = np.asarray(y_da.values, dtype=float).ravel()
-    keep = np.isfinite(xv) & np.isfinite(yv)
+    # Numbers and dates draw on a value axis; names (counties, stations, models)
+    # draw as Plotly categories. Positions missing either value are dropped.
+    values = []
+    keep = np.ones(x_da.size, dtype=bool)
+    for da in (x_da, y_da):
+        v = np.asarray(da.values).ravel()
+        if v.dtype.kind in "biuf":
+            v = v.astype(float)
+            keep &= np.isfinite(v)
+        elif v.dtype.kind == "M":
+            keep &= ~np.isnat(v)
+        elif v.dtype.kind == "m":
+            keep &= ~np.isnat(v)
+            v = v / np.timedelta64(1, "D")
+        else:
+            # x != x is NaN; None and NaN mark a missing name.
+            keep &= np.array([not (x is None or x != x) for x in v], dtype=bool)
+            # cftime dates go as ISO strings, which Plotly draws on a date axis.
+            v = np.array(
+                [x.isoformat() if hasattr(x, "calendar") else str(x) for x in v], dtype=object
+            )
+        values.append(v)
+    xv, yv = values
     if not keep.any():
         raise UsageError(f"{loc}: no position has a finite x and y to plot")
-    out = {"mode": "markers", "x": xv[keep], "y": yv[keep], "showlegend": False}
-    # A short 1-D series labels each point with its year or date.
-    if x_da.ndim == 1 and keep.sum() <= 25:
+    bar = trace.get("type") == "bar"
+    out = {"x": xv[keep], "y": yv[keep], "showlegend": False}
+    if not bar:
+        out["mode"] = "markers"
+    if trace.get("text") or trace.get("texttemplate"):
+        # The user's labels on the outermost points stay readable past the axis edge.
+        out["cliponaxis"] = False
+    # A short 1-D series of two numbers labels each point with its year, date or
+    # name, unless the trace sets its own text.
+    if (
+        not bar
+        and x_da.ndim == 1
+        and xv.dtype.kind == "f"
+        and yv.dtype.kind == "f"
+        and keep.sum() <= 25
+        and not (trace.get("text") or trace.get("texttemplate"))
+    ):
         labels = [
             str(v) if isinstance(v, (int, np.integer)) else format_plot_date(v)
             for v in x_da[x_da.dims[0]].values
@@ -1020,7 +1060,6 @@ def bind_windrose(trace, meta, ctx, loc):
     source = meta.get("source") or {}
     ds = _dataset(ctx, source, f"{loc}.source")
     u_name, v_name = resolve_uv(ds, source.get("u"), source.get("v"))
-    ds = to_standard_units(ds, variables=[u_name, v_name])
     u_da = _subset(ctx, source, _sel(plain(ds[u_name]), source, f"{loc}.source"))
     v_da = _subset(ctx, source, _sel(plain(ds[v_name]), source, f"{loc}.source"))
     point = source.get("point") or ctx.point
@@ -1132,7 +1171,7 @@ _TYPES_FOR_BIND = {
     "points": {"scatter", "scattergl"},
     "geojson": {"scatter", "scattergl"},
     "series": {"scatter", "scattergl", "bar"},
-    "xy": {"scatter", "scattergl"},
+    "xy": {"scatter", "scattergl", "bar"},
     "samples": {"box", "scatter", "violin"},
     "windrose": {"barpolar"},
 }

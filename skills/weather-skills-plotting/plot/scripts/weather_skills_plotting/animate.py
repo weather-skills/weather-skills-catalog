@@ -5,7 +5,8 @@ default). Animation keeps panel 1 as the visible figure and makes every panel a
 Plotly frame: the frame carries only the traces that differ from panel 1 (the
 field, stations, arrows), not the overlays or plain traces that repeat on every
 panel, plus that panel's title. Play / pause buttons and a slider are added
-unless the user's layout already sets ``updatemenus`` / ``sliders``.
+unless the user's layout already sets ``updatemenus`` / ``sliders``, or the
+figure is bound for a GIF, which plays on its own.
 """
 
 from __future__ import annotations
@@ -66,8 +67,14 @@ def _panel_title_text(annotations: list, p: int):
     return next((a.get("text") for a in annotations if a.get("name") == name), None)
 
 
-def animate_figure(fig, *, user_layout: dict | None = None, animation: dict | None = None):
-    """Return a one-panel ``go.Figure`` whose frames are ``fig``'s panels."""
+def animate_figure(
+    fig, *, user_layout: dict | None = None, animation: dict | None = None, controls=True
+):
+    """Return a one-panel ``go.Figure`` whose frames are ``fig``'s panels.
+
+    ``controls=False`` leaves out play / pause and the slider (and the room
+    under the map for them), for a GIF.
+    """
     import plotly.graph_objects as go
 
     user_layout = user_layout or {}
@@ -77,8 +84,9 @@ def animate_figure(fig, *, user_layout: dict | None = None, animation: dict | No
     n = 1 + max((_panel_of(t) for t in data), default=0)
     if n < 2:
         raise UsageError(
-            "nothing to animate: the map has a single panel. Animate a dim with at least two "
-            "values (data[].meta.facet, default step or time), or drop --animate for one map"
+            "nothing to animate: the figure has a single panel. Animation plays a map's "
+            "times or steps (data[].meta.facet picks another dim, at least two values); time "
+            "series and other non-map plots don't animate, so drop --animate"
         )
 
     panels = [[t for t in data if _panel_of(t) == p] for p in range(n)]
@@ -100,6 +108,15 @@ def animate_figure(fig, *, user_layout: dict | None = None, animation: dict | No
             if _content(trace) != base_content[j]:
                 varying.add(j)
     indices = sorted(varying)
+    if controls:
+        # Plotly.animate redraws a changing (animatable) scatter in a pass that drops
+        # the heatmap layer, so the map flashes blank each frame; scattergl is not
+        # animatable and redraws in one go. The GIF draws stills and keeps SVG scatter.
+        for j in indices:
+            if base[j].get("type") == "scatter":
+                base[j]["type"] = "scattergl"
+                for p in range(n):
+                    panels[p][j] = {**panels[p][j], "type": "scattergl"}
 
     # Panel 2..N titles sit on x2, x3 … and drop out here; panel 1's becomes the frame label.
     annotations = [a for a in layout.get("annotations") or [] if _annotation_on_panel_one(a)]
@@ -155,7 +172,7 @@ def animate_figure(fig, *, user_layout: dict | None = None, animation: dict | No
         right=bool(bars) and not horizontal,
         below=horizontal,
         # Room under the map for the play button and slider.
-        below_lines=6,
+        below_lines=6 if controls else 0,
         user=user_layout,
     )
     out_layout.update(sized)
@@ -168,7 +185,7 @@ def animate_figure(fig, *, user_layout: dict | None = None, animation: dict | No
         "fromcurrent": True,
         "mode": "immediate",
     }
-    if "updatemenus" not in user_layout:
+    if controls and "updatemenus" not in user_layout:
         out_layout["updatemenus"] = [
             {
                 "type": "buttons",
@@ -192,17 +209,18 @@ def animate_figure(fig, *, user_layout: dict | None = None, animation: dict | No
                 ],
             }
         ]
-    if "sliders" not in user_layout:
+    if controls and "sliders" not in user_layout:
         # The frame's label is the title above the map, so the slider shows no text.
         out_layout["sliders"] = [
             {
                 "active": 0,
-                "x": 0.2,
-                "len": 0.8,
+                "x": 0,
+                "len": 1,
                 "xanchor": "left",
                 "y": 0,
                 "yanchor": "top",
-                "pad": {"t": 35},
+                # Starts right of the ~140 px Play / Pause pair, and still ends at the map's edge.
+                "pad": {"t": 35, "l": 160},
                 "currentvalue": {"visible": False},
                 "font": {"color": "rgba(0,0,0,0)"},
                 "steps": [
@@ -223,7 +241,7 @@ def animate_figure(fig, *, user_layout: dict | None = None, animation: dict | No
             }
         ]
     for key in ("updatemenus", "sliders"):
-        if key in user_layout:
+        if controls and key in user_layout:
             out_layout[key] = copy.deepcopy(user_layout[key])
 
     return go.Figure({"data": base, "layout": out_layout, "frames": frames})
@@ -240,32 +258,47 @@ def _annotation_on_panel_one(item: dict) -> bool:
     return True
 
 
+def write_gif(fig, output, *, duration=DEFAULT_DURATION_MS, scale=1):
+    """Write an animated figure's frames as a looping GIF, ``duration`` ms per frame.
+
+    Each frame is drawn as a PNG by kaleido (one browser for all of them),
+    then Pillow joins them.
+    """
+    import tempfile
+    from pathlib import Path
+
+    import plotly.io as pio
+    from PIL import Image
+
+    from weather_skills_plotting import _float32
+
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    spec = _float32(fig.to_plotly_json())
+    stills = []
+    for frame in spec["frames"]:
+        # Plotly merges a frame's traces into the base traces it names.
+        data = list(spec["data"])
+        # A frame that changes no trace (a constant field) has neither key.
+        for i, trace in zip(frame.get("traces", []), frame.get("data", []), strict=True):
+            data[i] = {**data[i], **trace}
+        # A still never shows hover, so the heatmaps' customdata stays out (as in export).
+        data = [
+            {k: v for k, v in t.items() if k != "customdata"}
+            if t.get("type") in ("heatmap", "contour")
+            else t
+            for t in data
+        ]
+        stills.append({"data": data, "layout": {**spec["layout"], **frame.get("layout", {})}})
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = [Path(tmp) / f"{i}.png" for i in range(len(stills))]
+        pio.write_images(stills, paths, scale=scale, validate=False)
+        images = [Image.open(p).convert("RGB") for p in paths]
+    images[0].save(output, save_all=True, append_images=images[1:], duration=duration, loop=0)
+    return output
+
+
 def estimate_html_mb(fig) -> float:
     """Size of the figure JSON written into the HTML, in MB (plotly.js adds ~4.5 MB on top)."""
     from weather_skills_plotting import _float32
 
     return len(json.dumps(_float32(fig.to_plotly_json()))) / 1e6
-
-
-def build_animation_spec(datasets: dict) -> dict:
-    """The base spec for ``plot --animate``: one gridded input, one heatmap, a frame per value."""
-    from weather_skills_core.cf import cf_dim
-
-    from weather_skills_plotting.cli import skeleton
-
-    if not datasets:
-        raise UsageError("pass --animate with -i/--input, or a --spec with layout.meta.inputs")
-    if len(datasets) > 1:
-        raise UsageError(
-            "--animate draws one gridded input; got several. To animate precip under isobars, "
-            "merge the two fields into one Zarr and add a trace that reads the other variable"
-        )
-    key, grid = next(iter(datasets.items()))
-    lat, lon = cf_dim(grid, "latitude"), cf_dim(grid, "longitude")
-    if lat not in grid.dims or lon not in grid.dims:
-        raise UsageError(
-            f"--animate needs a latitude/longitude grid; got dims {list(grid.dims)}. "
-            "For station or 1-D data drop --animate"
-        )
-    data = [{"uid": key, "type": "heatmap", "meta": {"source": {"input": key}}}]
-    return skeleton("plot --animate", datasets, data)

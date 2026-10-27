@@ -53,7 +53,7 @@ Every fixed color table is in `default.json`, so a copy of it shows them:
 | `spi` | Standardized Precipitation Index (CHC `spi_cmap.pro`) |
 | `rocket` | Default sequential scale (seaborn "rocket", light to dark) |
 | `hits` | Three-flag fields: verify hits (disagree / below / hit) and any CF field with three `flag_values`. Red / white / green; white so the grey no-data background never reads as a class |
-| `bias`, `precip_bias`, `mae` | plot-verify's bias (RdBu), rainfall bias (brown too dry … green too wet) and MAE scales |
+| `bias`, `precip_bias`, `mae` | the verify grid's bias (RdBu), rainfall bias (brown too dry … green too wet) and MAE scales |
 | `wind_rose` | One color per wind-rose speed class, light to dark |
 | `colorblind` | The `colorblind` template's colorway |
 
@@ -104,6 +104,7 @@ merges into the standard one.
 | `classed_colorbar` | The colorbar of a class palette; the outline keeps white classes visible |
 | `isobars` | A contour trace with no colors of its own, drawn over shading |
 | `map_marks` | A plain trace (no `meta.bind`) repeated on every map panel |
+| `highs`, `lows` | Station points from local-extrema (`extremum_kind` high / low): an H or L with the central value |
 | `boundary` | A GeoJSON outline of five polygons or fewer (more use `overlays.admin1`) |
 | `arrows` | Wind arrows and the reference arrow |
 | `arrow_key_box` | The box behind the reference arrow |
@@ -113,7 +114,11 @@ merges into the standard one.
 ## `overlays`
 
 Plotly scatter line styles for the base-map layers: `admin1`, `rivers`,
-`lakes`, `borders`, `coastline`, drawn in that order (later on top). A theme's
+`lakes`, `borders`, `disputed`, `coastline`, drawn in that order (later on top).
+`borders` holds agreed international boundaries; `disputed` holds every other
+Natural Earth land line (disputed, indefinite, line of control, lease limit),
+grey, slightly thinner and dashed by default so an official boundary drawn on top
+(`meta.bind` `geojson`) reads first. A theme's
 style merges into the standard one, so `{"borders": {"line": {"color":
 "#333333"}}}` keeps the standard width. A spec's `layout.meta.overlays` turns
 layers on or off. `admin1` also styles an outline layer with many polygons (county

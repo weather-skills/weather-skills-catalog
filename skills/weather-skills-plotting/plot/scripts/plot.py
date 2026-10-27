@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core>=0.1.1",
+#   "weather-skills-core>=0.2.0",
 #   "cf-xarray>=0.11",
 #   "cftime>=1.6",
 #   "numpy>=2.5",
@@ -25,7 +25,6 @@ from weather_skills_core import Dataset, UsageError, weather_skill
 from weather_skills_core.cf import cf_dim
 
 from weather_skills_plotting import parse_spec_arg
-from weather_skills_plotting.animate import build_animation_spec
 from weather_skills_plotting.cli import (
     input_ids,
     parse_input,
@@ -39,7 +38,6 @@ from weather_skills_plotting.mediogram import build_mediogram_spec
 from weather_skills_plotting.reference import install_spec_help
 from weather_skills_plotting.series import (
     MAX_INPUTS,
-    inherit_from_first,
     trace_label,
     warn_disjoint_dates,
     warn_mixed_units,
@@ -48,7 +46,7 @@ from weather_skills_plotting.spec import DUMP_SPEC_HELP, SPEC_ARGUMENT_HELP, mer
 from weather_skills_plotting.verify import build_verify_spec
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "1.0.1"
+_SKILL_VERSION = "1.0.3"
 
 LAYER_KINDS = ("heatmap", "contour", "scatter", "quiver", "outline", "mask")
 _ZARR_LAYERS = frozenset({"heatmap", "contour", "scatter", "quiver"})
@@ -79,16 +77,18 @@ def parse_layer(value):
     return LayerArg(kind, *split_name(path.strip(), "--layer"))
 
 
-def _default_trace(uid: str, ds, *, xaxis=None) -> dict:
-    """Heatmap for a lat/lon grid, station markers for points, else a line."""
+def _default_trace(uid: str, ds, user=None, *, xaxis=None) -> dict:
+    """Heatmap for a lat/lon grid, station markers for points, else a line. A ``user`` trace
+    naming ``meta.x`` / ``meta.y`` is an xy plot, so its stations are not a map."""
     source = {"input": uid}
+    xy = bool({"x", "y"} & set((user or {}).get("meta") or {}))
     lat, lon = cf_dim(ds, "latitude"), cf_dim(ds, "longitude")
     pdim = point_dim(ds)
     tdim = next((d for d in ("time", "step") if d in ds.dims and ds.sizes[d] > 1), None)
     if pdim is not None and ds.sizes[pdim] == 1 and tdim:
         # One station over time is a time series, not one dot on a map.
         trace = {"type": "scatter", "meta": {"source": {**source, "isel": {pdim: 0}}}}
-    elif pdim is not None:
+    elif pdim is not None and not xy:
         trace = {"type": "scatter", "meta": {"bind": "points", "source": source}}
     elif lat in ds.dims and lon in ds.dims:
         trace = {"type": "heatmap", "meta": {"source": source}}
@@ -98,6 +98,23 @@ def _default_trace(uid: str, ds, *, xaxis=None) -> dict:
     if xaxis:
         trace.update(xaxis=xaxis, yaxis="y" + xaxis[1:])
     return trace
+
+
+def _as_drawn(ds, trace):
+    """The input as the spec's own variable / isel / sel / along leave it: the default fits
+    what is drawn (one line per station with ``along``, not a station map)."""
+    meta = (trace or {}).get("meta") or {}
+    source = meta.get("source") or {}
+    if source.get("variable") in ds.data_vars:
+        ds = ds[[source["variable"]]]
+    picks = {**(source.get("isel") or {}), **(source.get("sel") or {})}
+    if meta.get("along"):
+        picks[meta["along"]] = 0
+    for dim, pick in picks.items():
+        # One value drops the dim; which value does not matter for the shape.
+        if dim in ds.dims and not isinstance(pick, (list, dict)):
+            ds = ds.isel({dim: 0})
+    return ds
 
 
 def _layer_traces(layers):
@@ -183,7 +200,8 @@ def _layer_traces(layers):
 @weather_skill.argument(
     "--animate",
     action="store_true",
-    help="Animate one gridded -i input through its times or steps; -o must end in .html.",
+    help="Play the map's times or steps as frames of one animated map instead of side-by-side "
+    "panels; takes the same -i / --layer inputs as a still map. -o must end in .html or .gif.",
 )
 @weather_skill.argument("--spec", type=parse_spec_arg, help=SPEC_ARGUMENT_HELP)
 @weather_skill.argument(
@@ -215,6 +233,7 @@ def plot(
         raise UsageError("pick one of --obs/--forecast/--verify, --mediogram, or --animate")
     # A dumped spec replays its own mode: an animation spec animates again.
     replayed = ((spec.data.get("layout") or {}).get("meta") or {}).get("skill") if spec else None
+    animate = animate or (replayed == "plot --animate" and not files and not layers)
     if grid:
         if inputs or layers:
             raise UsageError("--obs/--forecast/--verify make a verification grid; drop -i/--layer")
@@ -225,13 +244,6 @@ def plot(
             raise UsageError("--mediogram takes two -i inputs (forecast, m-climate), not --layer")
         merged, datasets = build_mediogram_spec(files, spec)
         return run(merged, None, datasets, output, dump_spec, theme_file=theme_file)
-    if animate or (replayed == "plot --animate" and not files):
-        if layers:
-            raise UsageError("--animate takes one -i input, not --layer")
-        cli = dict(zip(input_ids([x.name for x in inputs]), files, strict=True))
-        datasets = spec_datasets(spec, cli)
-        base = build_animation_spec(datasets)
-        return run(base, spec, datasets, output, dump_spec, theme_file=theme_file, animate=True)
     if replayed in ("plot --verify", "plot --mediogram") and not files and not layers:
         # The dumped spec already holds every trace and its layout.
         return run(spec.data, None, spec.opened(), output, dump_spec, theme_file=theme_file)
@@ -243,6 +255,11 @@ def plot(
         raise UsageError(
             "pass -i/--input or --layer, not both (-i takes only outline: and mask: layers)"
         )
+    if animate and len(files) > 1:
+        raise UsageError(
+            "--animate plays one map: stack the inputs with --layer (heatmap:, contour:, "
+            "scatter:, quiver:, outline:, mask:) instead of several -i"
+        )
     layout = {}
     series = False
     if layers:
@@ -253,7 +270,9 @@ def plot(
     else:
         cli = dict(zip(input_ids([x.name for x in inputs]), files, strict=True))
         datasets = spec_datasets(spec, cli)
-        data = [_default_trace(key, d) for key, d in datasets.items()]
+        user = {t.get("uid"): t for t in (spec.data.get("data") or [])} if spec else {}
+        drawn = {key: _as_drawn(d, user.get(key)) for key, d in datasets.items()}
+        data = [_default_trace(key, d, user.get(key)) for key, d in drawn.items()]
         # 1-D series share one x/y axis, one legend entry per file.
         series = bool(data) and all(
             t["type"] == "scatter" and "bind" not in t["meta"] for t in data
@@ -268,8 +287,8 @@ def plot(
                 data[i]["name"] = trace_label(d, i, key)
         elif cli:
             data = [
-                _default_trace(key, d, xaxis=None if i == 0 else f"x{i + 1}")
-                for i, (key, d) in enumerate(datasets.items())
+                _default_trace(key, d, user.get(key), xaxis=None if i == 0 else f"x{i + 1}")
+                for i, (key, d) in enumerate(drawn.items())
             ]
         else:
             data = []
@@ -291,15 +310,14 @@ def plot(
             raise UsageError(
                 "pass -i/--input, --layer, or a --spec with data and layout.meta.inputs"
             )
-    base = skeleton("plot", datasets, data)
+    base = skeleton("plot --animate" if animate else "plot", datasets, data)
     if layout.get("meta"):
         base["layout"]["meta"].update(layout["meta"])
     merged = merge_spec(base, spec.data if spec is not None else {})
     if series:
-        merged = inherit_from_first(merged, datasets)
         warn_mixed_units(merged, datasets)
         warn_disjoint_dates(merged, datasets)
-    return run(merged, None, datasets, output, dump_spec, theme_file=theme_file)
+    return run(merged, None, datasets, output, dump_spec, theme_file=theme_file, animate=animate)
 
 
 install_spec_help(plot)

@@ -1,8 +1,7 @@
-"""Several 1-D series on one shared time axis: labels, inherited settings, warnings."""
+"""Several 1-D series on one shared time axis: labels and warnings."""
 
 from __future__ import annotations
 
-import copy
 from pathlib import Path
 
 from weather_skills_core.cf import auto_variable
@@ -10,12 +9,8 @@ from weather_skills_core.units import units_equal, variable_units
 
 from weather_skills_plotting.cli import input_path, warn
 from weather_skills_plotting.labels import dataset_display_label
-from weather_skills_plotting.layout import axis_suffix
 
 MAX_INPUTS = 26
-# meta keys a later trace takes from data[0] when it leaves them unset.
-INHERITED_META = ("along", "along_color", "band", "members", "align")
-INHERITED_SOURCE = ("variable",)
 
 
 def _size1(ds, *names):
@@ -41,49 +36,10 @@ def trace_label(ds, idx: int, key: str | None = None) -> str:
     return dataset_display_label(ds, f"input {idx + 1}")
 
 
-def inherit_from_first(spec: dict, datasets: dict | None = None) -> dict:
-    """Series settings on data[0] apply to every series that does not set its own.
-
-    ``along`` (and its band and colours) passes on only to an input that has
-    that dim: an ensemble's spread does not apply to a climatology line.
-    """
-    data = spec.get("data") or []
-    if len(data) < 2:
-        return spec
-    first = data[0].get("meta") or {}
-    for trace in data[1:]:
-        meta = trace.setdefault("meta", {})
-        source = meta.get("source") or {}
-        ds = (datasets or {}).get(str(source.get("input")))
-        along = first.get("along")
-        # The dims of the variable this trace draws, not of the whole file.
-        var = source.get("variable") or (first.get("source") or {}).get("variable")
-        dims = ds[var].dims if ds is not None and var in ds else getattr(ds, "dims", ())
-        lacks_along = along and ds is not None and along not in dims
-        for key in INHERITED_META:
-            if lacks_along and key in ("along", "along_color", "band", "members"):
-                continue
-            if key in first and key not in meta:
-                meta[key] = copy.deepcopy(first[key])
-        source = meta.setdefault("source", {})
-        for key in INHERITED_SOURCE:
-            if key in (first.get("source") or {}) and key not in source:
-                source[key] = copy.deepcopy(first["source"][key])
-    return spec
-
-
 def _by_yaxis(spec: dict, datasets: dict) -> dict:
-    """``{y-axis: [(uid, input key, ds, variable), …]}`` for the series each axis draws.
-
-    Mirrors the chart layout: with ``layout.grid`` and no trace axes set, the
-    k-th trace gets the k-th panel's y-axis.
-    """
-    grid = (spec.get("layout") or {}).get("grid") or {}
-    cells = (grid.get("rows") or 1) * (grid.get("columns") or 1)
-    data = spec.get("data") or []
-    explicit = any(t.get("xaxis") or t.get("yaxis") for t in data)
+    """``{y-axis: [(uid, input key, ds, variable), …]}`` for the series each axis draws."""
     by_axis = {}
-    for k, trace in enumerate(data):
+    for trace in spec.get("data") or []:
         meta = trace.get("meta") or {}
         source = meta.get("source") or {}
         key = str(source.get("input"))
@@ -92,8 +48,6 @@ def _by_yaxis(spec: dict, datasets: dict) -> dict:
             continue
         var = meta.get("y") or source.get("variable") or auto_variable(ds)
         axis = trace.get("yaxis") or "y"
-        if cells > 1 and not explicit and k < cells:
-            axis = f"y{axis_suffix(k)}"
         by_axis.setdefault(axis, []).append((trace.get("uid") or key, key, ds, var))
     return by_axis
 

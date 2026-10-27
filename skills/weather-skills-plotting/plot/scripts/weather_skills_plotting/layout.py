@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import math
+import re
 
 import numpy as np
 from weather_skills_core.errors import UsageError
@@ -120,12 +121,14 @@ def layout_value(user_layout: dict, path: str):
 
 
 def title_lines(title) -> int:
-    """Lines the figure title takes: 0, 1, or 2 when it has a ``subtitle``."""
+    """Lines the figure title takes: one per ``<br>``-separated line, plus a ``subtitle``."""
     if not isinstance(title, dict):
-        return 1 if title else 0
-    if not title.get("text"):
+        title = {"text": title}
+    text = str(title.get("text") or "")
+    if not text:
         return 0
-    return 2 if (title.get("subtitle") or {}).get("text") else 1
+    lines = len(re.split(r"<br\s*/?>", text, flags=re.IGNORECASE))
+    return lines + (1 if (title.get("subtitle") or {}).get("text") else 0)
 
 
 def map_layout(

@@ -103,6 +103,9 @@ def figure_counts(fig) -> list[tuple[str, int, int]]:
             raw = tr.marker.color
         elif getattr(tr, "y", None) is not None:
             raw = tr.y
+            # Names on y (a dot chart by county): the values are on x.
+            if getattr(tr, "x", None) is not None and np.asarray(raw).dtype.kind in "OUS":
+                raw = tr.x
         elif getattr(tr, "r", None) is not None:
             raw = tr.r
         else:

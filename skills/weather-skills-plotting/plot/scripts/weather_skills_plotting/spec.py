@@ -123,26 +123,24 @@ def parse_plot_spec(value):
         raise argparse.ArgumentTypeError(f"{exc}. {SPEC_HELP_HINT}") from None
 
 
+_THEME_HINT = (
+    "; a theme is not part of the spec: save it to a file for --theme-file, or set one "
+    "trace's colors with data[i].meta.palette"
+)
+
+
 def check_shape(data: dict) -> None:
     """Top level is ``data`` / ``layout`` only."""
     unknown = sorted(set(data) - TOP_KEYS)
     if unknown:
         raise UsageError(
             f"plot spec top-level key(s) {', '.join(unknown)} are not allowed; a spec is a "
-            'Plotly figure {"data": [traces], "layout": {…}}'
+            'Plotly figure {"data": [traces], "layout": {…}}' + _THEME_HINT * ("theme" in unknown)
         )
     if not isinstance(data.get("data", []), list):
         raise UsageError("plot spec data must be a list of trace objects")
     if not isinstance(data.get("layout", {}), dict):
         raise UsageError("plot spec layout must be an object")
-    title = (data.get("layout") or {}).get("title")
-    text = title.get("text") if isinstance(title, dict) else title
-    if isinstance(text, str) and "<br" in text.lower():
-        # Only a subtitle gets room above the plot; a <br> line runs into the legend or panels.
-        raise UsageError(
-            "plot spec layout.title.text has a <br>; put the second line in "
-            'layout.title.subtitle: {"title": {"text": "…", "subtitle": {"text": "…"}}}'
-        )
     for i, trace in enumerate(data.get("data") or []):
         if not isinstance(trace, dict):
             raise UsageError(f"plot spec data[{i}] must be an object")
@@ -208,6 +206,16 @@ def merge_traces(base: list, overlay: list) -> list:
         uid = trace.get("uid")
         if uid is not None:
             idx = next((j for j, t in enumerate(out) if t.get("uid") == uid), None)
+            base, _, part = str(uid).rpartition("-")
+            band_part = part in ("members", "band") and base in {
+                t.get("uid")
+                for t in [*out, *overlay]
+                if (t.get("meta") or {}).get("band") is not None
+            }
+            if idx is None and band_part:
+                # Styles one part (member lines, shading) of band trace ``base``.
+                out.append(copy.deepcopy(trace))
+                continue
             if idx is None:
                 if not set(trace) & {"type", "meta", "x", "y", "z", "lat", "lon", "r", "theta"}:
                     # Only styling for a uid nothing has: a typo, not a new trace.
@@ -217,7 +225,32 @@ def merge_traces(base: list, overlay: list) -> list:
                         f"--spec data[{i}] uid {uid!r} matches no trace (uids: "
                         f"{', '.join(have) or 'none'})"
                         + (f"; did you mean {near[0]!r}?" if near else "")
-                        + "; a new trace needs a type"
+                        + "; a new trace needs data of its own (x / y, or meta.source)"
+                        + (
+                            f"; {uid!r} styles part of a trace only when {base!r} has meta.band"
+                            if part in ("members", "band")
+                            else ""
+                        )
+                    )
+                meta = trace.get("meta") or {}
+                source = meta.get("source") or {}
+                inputs = {
+                    ((t.get("meta") or {}).get("source") or {}).get("input"): t.get("uid")
+                    for t in out
+                }
+                inputs.pop(None, None)
+                if (
+                    len(inputs) > 1
+                    and (meta.get("x") or meta.get("y") or meta.get("bind") or source)
+                    and not source.get("input")
+                    and not source.get("geojson")
+                ):
+                    # Likely meant to restyle an input's own trace, e.g. uid "0" for "West".
+                    raise UsageError(
+                        f"--spec data[{i}] uid {uid!r} matches no trace, so it would be a new "
+                        "trace with no meta.source.input; the inputs' traces have uids "
+                        f"{', '.join(repr(str(u)) for u in inputs.values())}. Use one of those "
+                        "uids to restyle that input's trace, or set meta.source.input"
                     )
                 out.append(copy.deepcopy(trace))
                 continue
@@ -264,6 +297,8 @@ def _check_keys(obj, allowed, loc: str) -> None:
         if "." in key:
             head, _, rest = key.partition(".")
             hint = f'; a dotted name is a nested path: write {{"{head}": {{"{rest}": …}}}}'
+        elif key == "theme":
+            hint = _THEME_HINT
         elif loc.endswith("geo") and key in _PLACE_NAME_KEYS:
             hint = (
                 "; geo takes coordinates only — run resolve-region for a named place and "
@@ -409,6 +444,15 @@ def check_meta(spec: dict, palettes: dict) -> None:
         meta = trace.get("meta")
         if meta is not None:
             check_trace_meta(meta, f"data[{i}].meta", palettes)
+    for key in spec.get("layout") or {}:
+        if re.fullmatch(r"geo\d*", key):
+            raise UsageError(
+                f"plot spec layout.{key}: maps here are plain x/y axes, so layout.{key} draws "
+                "nothing. Coastlines, country borders, lakes and rivers are drawn by default; "
+                "style or hide them with layout.meta.overlays, e.g. "
+                '{"layout": {"meta": {"overlays": {"borders": {"line": {"color": "black", '
+                '"width": 1}}}}}}'
+            )
     meta = (spec.get("layout") or {}).get("meta")
     if meta is not None:
         check_layout_meta(meta)

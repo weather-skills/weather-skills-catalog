@@ -52,6 +52,10 @@
     "precip": "tt_precip_total",
     "wind_speed": "tt_wind"
   },
+  "styles": {
+    "highs": {"texttemplate": "<b>%{customdata:.0f}</b><br><b>H</b>", "textfont": {"color": "#1f3fbf"}},
+    "lows": {"texttemplate": "<b>%{customdata:.0f}</b><br><b>L</b>", "textfont": {"color": "#b5121b"}}
+  },
   "overlays": {
     "admin1": {"line": {"color": "#8c8c8c", "width": 0.5}},
     "borders": {"line": {"color": "#000000", "width": 0.9}},

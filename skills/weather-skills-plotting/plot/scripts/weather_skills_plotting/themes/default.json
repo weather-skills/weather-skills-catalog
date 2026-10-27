@@ -107,6 +107,8 @@
     "classed_colorbar": {"outlinewidth": 1, "outlinecolor": "#999999"},
     "isobars": {"line": {"color": "black", "width": 1}},
     "map_marks": {"marker": {"color": "#262626"}, "line": {"color": "#262626"}},
+    "highs": {"mode": "text", "texttemplate": "<b>H</b><br>%{customdata:.0f}", "textfont": {"color": "#1f4fbf", "size": 14, "shadow": "1px 1px 1px white, -1px -1px 1px white, 1px -1px 1px white, -1px 1px 1px white"}},
+    "lows": {"mode": "text", "texttemplate": "<b>L</b><br>%{customdata:.0f}", "textfont": {"color": "#c8102e", "size": 14, "shadow": "1px 1px 1px white, -1px -1px 1px white, 1px -1px 1px white, -1px 1px 1px white"}},
     "boundary": {"line": {"color": "black", "width": 2}},
     "arrows": {"line": {"color": "black"}},
     "arrow_key_box": {"fillcolor": "rgba(255, 255, 255, 0.85)"},
@@ -118,6 +120,7 @@
     "rivers": {"line": {"color": "#708090", "width": 0.6}},
     "lakes": {"line": {"color": "#708090", "width": 0.4}, "fill": "toself", "fillcolor": "#708090"},
     "borders": {"line": {"color": "#262626", "width": 1.2}},
+    "disputed": {"line": {"color": "#404040", "width": 1, "dash": "4px,3px"}},
     "coastline": {"line": {"color": "black", "width": 1.2}}
   }
 }

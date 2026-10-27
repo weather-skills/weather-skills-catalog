@@ -69,14 +69,23 @@ def unwrap_geoms(geoms, lon_min):
     return [shapely.transform(g, shift) for g in geoms if g is not None and not g.is_empty]
 
 
-def clip_ne_geoms(resolution, category, name, clip_geom):
-    """Natural Earth geometries intersecting ``clip_geom`` (eager download)."""
+def clip_ne_geoms(resolution, category, name, clip_geom, featurecla=None):
+    """Natural Earth geometries intersecting ``clip_geom`` (eager download).
+
+    ``featurecla`` keeps only records whose class is (True) or is not (False)
+    an agreed international boundary; None keeps every record.
+    """
     import cartopy.io.shapereader as shpreader
 
     path = shpreader.natural_earth(resolution=resolution, category=category, name=name)
     geoms = []
     # The bbox skips shapes outside the view without parsing them.
-    for geom in shpreader.Reader(path, bbox=clip_geom.bounds).geometries():
+    for rec in shpreader.Reader(path, bbox=clip_geom.bounds).records():
+        geom = rec.geometry
+        if featurecla is not None:
+            agreed = str(rec.attributes.get("FEATURECLA", "")).startswith("International boundary")
+            if agreed != featurecla:
+                continue
         if geom is None or geom.is_empty:
             continue
         try:
@@ -109,14 +118,21 @@ def _bundled_country_geoms(clip_geom):
             poly = shape(geom)
             if not poly.intersects(clip_geom):
                 continue
-            geoms.append(poly.intersection(clip_geom))
+            clipped = poly.intersection(clip_geom)
         except Exception:  # noqa: BLE001
             continue
-    return [shapely.boundary(g) for g in geoms if g is not None and not g.is_empty]
+        # Clipping at the map edge can leave a collection with line or point slivers,
+        # which have no boundary; outline only the polygon parts.
+        for part in getattr(clipped, "geoms", [clipped]):
+            if part.geom_type in ("Polygon", "MultiPolygon") and not part.is_empty:
+                geoms.append(shapely.boundary(part))
+    return geoms
 
 
 # Base-map layers ``layout.meta.overlays`` can switch on or off, in draw order (later on top).
-OVERLAY_NAMES = ("admin1", "rivers", "lakes", "borders", "coastline")
+# ``borders`` is agreed international boundaries; ``disputed`` is every other
+# Natural Earth land line (disputed, indefinite, line of control, lease limit).
+OVERLAY_NAMES = ("admin1", "rivers", "lakes", "borders", "disputed", "coastline")
 
 
 def plain(da):
@@ -310,6 +326,7 @@ _NE_LAYERS = {
     "rivers": ("physical", "rivers_lake_centerlines", None),
     "lakes": ("physical", "lakes", None),
     "borders": ("cultural", "admin_0_boundary_lines_land", None),
+    "disputed": ("cultural", "admin_0_boundary_lines_land", None),
     "coastline": ("physical", "coastline", None),
 }
 _OVERLAY_CACHE: dict = {}
@@ -333,7 +350,8 @@ def overlay_geoms(extent, settings: dict):
 
     The Natural Earth scale follows the map span; admin-1 only appears on
     country-scale views unless set explicitly. A layer that cannot be fetched
-    warns and is skipped, so the map still renders.
+    warns and is skipped, so the map still renders; if borders or coastline
+    cannot be fetched, the country outlines bundled with core stand in for both.
     """
     scale = boundary_layers(extent)
     key = (
@@ -356,6 +374,7 @@ def overlay_geoms(extent, settings: dict):
             out = [("borders", unwrap_geoms(geoms, extent[0]) if extent[1] > 180 else geoms)]
         _OVERLAY_CACHE[key] = out
         return out
+    bundled = False
     for name in OVERLAY_NAMES:
         choice = settings.get(name)
         if choice is False:
@@ -364,14 +383,38 @@ def overlay_geoms(extent, settings: dict):
             continue
         category, ne_name, res = _NE_LAYERS[name]
         try:
-            geoms = clip_ne_geoms(res or scale["scale"], category, ne_name, clip)
+            featurecla = {"borders": True, "disputed": False}.get(name)
+            geoms = clip_ne_geoms(res or scale["scale"], category, ne_name, clip, featurecla)
         except Exception as exc:  # noqa: BLE001
-            print(f"Warning: {name} overlay unavailable ({exc}); skipping.", file=sys.stderr)
-            continue
+            if name not in ("borders", "coastline"):
+                print(f"Warning: {name} overlay unavailable ({exc}); skipping.", file=sys.stderr)
+                continue
+            if bundled:
+                # The bundled outlines already drawn include this layer's lines.
+                continue
+            # Country outlines trace both land borders and coasts.
+            print(
+                f"Warning: {name} overlay unavailable ({exc}); "
+                "drawing the bundled country outlines instead.",
+                file=sys.stderr,
+            )
+            geoms = _bundled_country_geoms(clip)
+            bundled = True
         if extent[1] > 180.0:
             geoms = unwrap_geoms(geoms, extent[0])
         if geoms:
             out.append((name, geoms))
+    layers = dict(out)
+    if "admin1" in layers and "disputed" in layers:
+        # Province lines run along disputed borders and would fill the gaps between its dashes.
+        import shapely
+
+        near = shapely.union_all(layers["disputed"]).buffer(0.02)
+        cut = [shapely.boundary(g).difference(near) for g in layers["admin1"]]
+        out = [
+            (name, [g for g in cut if not g.is_empty] if name == "admin1" else geoms)
+            for name, geoms in out
+        ]
     _OVERLAY_CACHE[key] = out
     return out
 

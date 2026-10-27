@@ -164,6 +164,23 @@ def test_scatter_of_two_variables(tmp_path, plot_fn, capsys):
     assert "data: not null (0 3/3 finite)" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("kind", ["scatter", "bar"])
+def test_xy_of_stations_is_not_a_station_map(tmp_path, plot_fn, capsys, kind):
+    pts = write_zarr(make_point_obs(n_time=1), tmp_path / "pts.zarr")
+    user = {
+        "data": [
+            {
+                "uid": "0",
+                "type": kind,
+                "meta": {"x": "point_id", "y": "precip", "source": {"isel": {"time": 0}}},
+            }
+        ]
+    }
+    spec = _dump(plot_fn, capsys, "-i", str(pts), "--spec", json.dumps(user))
+    assert "bind" not in spec["data"][0]["meta"]
+    run_skill(plot_fn, "-i", str(pts), "-o", str(tmp_path / "xy.png"), "--spec", json.dumps(user))
+
+
 def test_layers(tmp_path, plot_fn, capsys):
     grid = write_zarr(make_gridded(n_time=1), tmp_path / "grid.zarr")
     pts = write_zarr(make_point_obs(n_time=1), tmp_path / "pts.zarr")
@@ -206,6 +223,7 @@ def test_errors_are_actionable(tmp_path, plot_fn, capsys):
         ('{"inputs": [{"variable": "tp"}]}', "are not allowed"),
         ('{"data": [{"uid": "0", "colorscal": "Blues"}]}', "Did you mean"),
         ('{"layout": {"meta": {"geo": {"region": "Kenya"}}}}', "resolve-region"),
+        ('{"layout": {"geo": {"showcountries": true}}}', "layout.meta.overlays"),
     ]
     for spec, match in bad:
         with pytest.raises(SystemExit):
@@ -271,7 +289,7 @@ def test_series_share_one_axis_named_by_file(tmp_path, plot_fn, capsys):
     assert {(t.xaxis, t.yaxis) for t in fig.data} == {("x", "y")}
 
 
-def test_first_series_settings_apply_to_the_rest(tmp_path, plot_fn, capsys):
+def test_each_series_keeps_only_its_own_settings(tmp_path, plot_fn, capsys):
     a = write_zarr(_area(make_gridded(n_time=3)), tmp_path / "a.zarr")
     b = write_zarr(_area(make_gridded(n_time=3)), tmp_path / "b.zarr")
     user = {
@@ -281,7 +299,7 @@ def test_first_series_settings_apply_to_the_rest(tmp_path, plot_fn, capsys):
         ]
     }
     spec = _dump(plot_fn, capsys, "-i", str(a), "-i", str(b), "--spec", json.dumps(user))
-    assert spec["data"][1]["meta"]["source"]["variable"] == "precip"
+    assert "variable" not in spec["data"][1]["meta"]["source"]
     assert spec["data"][1]["type"] == "bar"
     out = tmp_path / "ts.png"
     run_skill(plot_fn, "-i", str(a), "-i", str(b), "-o", str(out), "--spec", json.dumps(user))
@@ -314,8 +332,11 @@ def test_mixed_units_warns_on_one_axis_only(tmp_path, plot_fn, capsys):
     run_skill(plot_fn, "-i", str(pa), "-i", str(pb), "--dump-spec", "-")
     assert "different units" in capsys.readouterr().err
 
-    # Separate panels from layout.grid are separate y-axes: no warning.
-    grid = {"layout": {"grid": {"rows": 2, "columns": 1, "pattern": "coupled"}}}
+    # A line on its own axes in a grid is a separate y-axis: no warning.
+    grid = {
+        "data": [{"uid": "1", "xaxis": "x2", "yaxis": "y2"}],
+        "layout": {"grid": {"rows": 2, "columns": 1, "pattern": "coupled"}},
+    }
     out = tmp_path / "panels.png"
     run_skill(plot_fn, "-i", str(pa), "-i", str(pb), "-o", str(out), "--spec", json.dumps(grid))
     assert "different units" not in capsys.readouterr().err
@@ -389,3 +410,30 @@ def test_dumped_animation_replays_as_an_animation(tmp_path, plot_fn, capsys):
     capsys.readouterr()
     run_skill(plot_fn, "--spec", str(dumped), "-o", str(tmp_path / "v.html"))
     assert "animation: 3 frames" in capsys.readouterr().err
+
+
+def test_station_picked_by_sel_is_a_line_on_the_shared_axes(tmp_path, plot_fn, capsys):
+    pts = write_zarr(make_point_obs(n_points=3), tmp_path / "pts.zarr")
+    sid = str(xr.open_zarr(pts)["point_id"].values[1])
+    user = {"data": [{"uid": u, "meta": {"source": {"sel": {"point_id": sid}}}} for u in "AB"]}
+    spec = _dump(plot_fn, capsys, "-i", f"{pts}=A", "-i", f"{pts}=B", "--spec", json.dumps(user))
+    assert all("bind" not in t["meta"] and "xaxis" not in t for t in spec["data"])
+    out = tmp_path / "st.png"
+    run_skill(
+        plot_fn, "-i", f"{pts}=A", "-i", f"{pts}=B", "-o", str(out), "--spec", json.dumps(user)
+    )
+    assert out.is_file()
+
+
+def test_along_stations_is_lines_not_a_station_map(tmp_path, plot_fn, capsys):
+    pts = write_zarr(make_point_obs(n_points=3), tmp_path / "pts.zarr")
+    user = {"data": [{"uid": "0", "meta": {"along": "point_id"}}]}
+    spec = _dump(plot_fn, capsys, "-i", str(pts), "--spec", json.dumps(user))
+    assert "bind" not in spec["data"][0]["meta"]
+
+
+def test_one_figure_to_several_outputs(tmp_path, plot_fn):
+    grid = write_zarr(make_gridded(), tmp_path / "grid.zarr")
+    png, html = tmp_path / "a.png", tmp_path / "a.html"
+    run_skill(plot_fn, "-i", str(grid), "-o", str(png), "-o", str(html))
+    assert png.is_file() and "Plotly.newPlot" in html.read_text()
