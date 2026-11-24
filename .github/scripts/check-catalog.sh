@@ -12,7 +12,7 @@ fi
 
 git submodule update --init --recursive --depth 1
 
-core=${CORE:-git+https://github.com/rhiza-research/weather-skills-core@main}
+core=${CORE:-git+https://github.com/weather-skills/weather-skills-core@main}
 failed=0
 
 while IFS= read -r path; do

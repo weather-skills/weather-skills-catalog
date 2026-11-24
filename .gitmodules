@@ -1,6 +1,6 @@
 [submodule "weather-skills"]
 	path = weather-skills
-	url = https://github.com/rhiza-research/weather-skills.git
+	url = https://github.com/weather-skills/weather-skills.git
 	branch = main
 [submodule "chc-skills"]
 	path = chc-skills
@@ -8,5 +8,13 @@
 	branch = main
 [submodule "weather-skills-plotting"]
 	path = weather-skills-plotting
-	url = https://github.com/rhiza-research/weather-skills-plotting.git
+	url = https://github.com/weather-skills/weather-skills-plotting.git
+	branch = main
+[submodule "weather-skills-fetchers"]
+	path = weather-skills-fetchers
+	url = https://github.com/rhiza-research/weather-skills-fetchers.git
+	branch = main
+[submodule "rhiza-weather-skills"]
+	path = rhiza-weather-skills
+	url = https://github.com/rhiza-research/rhiza-weather-skills.git
 	branch = main
