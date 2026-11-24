@@ -1,0 +1,14 @@
+{
+  "name": "weather-skills",
+  "description": "Weather and climate data agents and every skill in the weather-skills catalog: fetchers, transforms, and plotting.",
+  "owner": {
+    "name": "weather-skills"
+  },
+  "plugins": [
+    {
+      "name": "weather-skills",
+      "source": "./",
+      "description": "Weather and climate data agents and every skill in the weather-skills catalog: fetchers, transforms, and plotting."
+    }
+  ]
+}

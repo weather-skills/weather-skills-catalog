@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "weather-skills",
+  "displayName": "Weather Skills",
+  "description": "Weather and climate data agents and every skill in the weather-skills catalog: fetchers, transforms, and plotting.",
+  "author": {
+    "name": "Weather Skills",
+    "url": "https://github.com/weather-skills"
+  },
+  "homepage": "https://weather-skills.org",
+  "repository": "https://github.com/weather-skills/weather-skills-catalog",
+  "license": "MIT",
+  "skills": [
+    "./skills/weather-skills/",
+    "./skills/weather-skills-fetchers/",
+    "./skills/weather-skills-plotting/",
+    "./skills/rhiza-weather-skills/",
+    "./skills/chc-skills/"
+  ],
+  "keywords": [
+    "weather",
+    "climate",
+    "precipitation",
+    "reanalysis",
+    "geospatial",
+    "zarr",
+    "xarray",
+    "plotting"
+  ]
+}
