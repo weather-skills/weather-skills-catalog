@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core>=0.1.1",
+#   "weather-skills-core>=0.4.0",
 #   "fsspec",
 #   "aiohttp",
 #   "cftime>=1.6",
@@ -34,7 +34,7 @@ from weather_skills_core.units import (
 )
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.4"
+_SKILL_VERSION = "0.0.6"
 
 _BUCKET = "kenya-forecasting-data"
 _GCS_API = f"https://storage.googleapis.com/storage/v1/b/{_BUCKET}/o"

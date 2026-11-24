@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core>=0.1.1",
+#   "weather-skills-core>=0.4.0",
 #   "xarray",
 # ]
 # ///
@@ -16,7 +16,7 @@ from weather_skills_core.standard_utils import bbox_subset, latitude_weights
 from weather_skills_core.units import dequantify_dataset
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.5"
+_SKILL_VERSION = "0.0.6"
 
 # Classic IOD / Dipole Mode Index boxes (Saji et al.).
 # West: 50–70E, 10S–10N. East: 90–110E, 10S–0.

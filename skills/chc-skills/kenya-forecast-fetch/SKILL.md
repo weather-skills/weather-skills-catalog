@@ -6,12 +6,7 @@ compatibility: Requires Python 3.12 and uv. Opens public consolidated Zarr (nati
 allowed-tools: Bash(uv run ${CLAUDE_SKILL_DIR}/scripts/fetch.py *)
 metadata:
   catalog-group: fetchers
-  variables:
-    - tp
-    - t2m
-    - d2m
-    - cape
-    - tcw
+  variables: "tp t2m d2m cape tcw"
 ---
 
 # kenya-forecast-fetch

@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core>=0.1.1",
+#   "weather-skills-core>=0.4.0",
 # ]
 # ///
 """Resolve a bundled CHC region to a lat/lon bounding box and optional boundary GeoJSON."""
@@ -14,7 +14,7 @@ from weather_skills_core import DataError, UsageError, weather_skill
 from weather_skills_core.region import bbox_from_geometry, clean_region_name
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.2"
+_SKILL_VERSION = "0.0.4"
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 
@@ -66,6 +66,7 @@ def load(name):
 
 def write(path, text, what):
     try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(text)
     except OSError as exc:
         raise DataError(f"could not write {what} to {path}: {exc}") from None

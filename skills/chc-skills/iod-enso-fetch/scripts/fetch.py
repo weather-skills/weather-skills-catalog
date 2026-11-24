@@ -1,16 +1,17 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core>=0.1.1",
+#   "weather-skills-core>=0.4.0",
 #   "numpy",
 #   "pillow>=10",
 #   "xarray",
 # ]
 # ///
-"""Download Bureau of Meteorology IOD and ENSO graphs, index values, or ACCESS-S outlooks."""
+"""Download BoM and NOAA CPC IOD / ENSO index values or graphs, or BoM ACCESS-S outlooks."""
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import time
@@ -27,17 +28,16 @@ from weather_skills_core.cf import stamp_cf_coords
 from weather_skills_core.units import stamp_data_interval
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.2"
+_SKILL_VERSION = "0.0.4"
 
-IMG_HOST = "https://www.bom.gov.au/clim_data"
+BOM = "https://www.bom.gov.au/clim_data"
+CPC = "https://www.cpc.ncep.noaa.gov/data/indices"
 OBS_PAGE = "https://www.bom.gov.au/climate/enso/"
+CPC_PAGE = f"{CPC}/"
 FORECAST_PAGE = "https://www.bom.gov.au/climate/ocean/outlooks/?index=iod#tabs=Graphs"
 FORECAST_ARCHIVE = "https://www.bom.gov.au/climate/ocean/outlooks/archive"
 ARCHIVE_INDEX_URL = f"{FORECAST_ARCHIVE}/archive_index.json"
 _HTTP_TIMEOUT = 60
-
-# BoM switches Niño outlook plumes to Relative Niño filenames on this issue date.
-RNINO_START = date(2025, 7, 1)
 
 # BoM Akamai returns 403 for library-style User-Agents (e.g. "chc-skills/…").
 _USER_AGENT = (
@@ -45,433 +45,259 @@ _USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 )
 
-# Observation graphs overwritten in place (product IDCK000072 / IDCKGSM000).
-INDEX_FILES: dict[str, tuple[str, str]] = {
-    "iod": ("IDCK000072", "iod1.png"),
-    "enso": ("IDCK000072", "rnino_3.4.png"),
-    "nino3.4": ("IDCK000072", "nino3_4.png"),
-    "relative-nino3.4": ("IDCK000072", "rnino_3.4.png"),
-    "soi": ("IDCKGSM000", "soi30.png"),
-}
-
-# Matching clim_data text series (week-start, week-end, value).
-INDEX_DATA_FILES: dict[str, tuple[str, str]] = {
-    "iod": ("IDCK000072", "iod_1.txt"),
-    "enso": ("IDCK000072", "rnino_3.4.txt"),
-    "nino3.4": ("IDCK000072", "nino_3.4.txt"),
-    "relative-nino3.4": ("IDCK000072", "rnino_3.4.txt"),
-    "soi": ("IDCKGSM000", "soi.txt"),
-}
-
-# ACCESS-S plume / JSON region token (prefix ``r`` added for operational Niño).
-FORECAST_REGIONS: dict[str, str] = {
-    "iod": "iod",
-    "enso": "nino34",
-    "nino3.4": "nino34",
-    "relative-nino3.4": "nino34",
-}
-
-# Output variable + CF-ish metadata for the index series.
-INDEX_VARS: dict[str, tuple[str, str, str]] = {
+_RNINO = "Relative Niño3.4 sea surface temperature anomaly"
+# --index: (graph URL, or None for CPC text-only series; text series URL; variable; units;
+# long name). BoM overwrites its files in place; each holds the full history.
+INDICES: dict[str, tuple[str | None, str, str, str, str]] = {
     "iod": (
+        f"{BOM}/IDCK000072/iod1.png",
+        f"{BOM}/IDCK000072/iod_1.txt",
         "iod_mode_index",
         "degree_Celsius",
         "Indian Ocean Dipole Mode Index (west minus east SST anomaly)",
     ),
     "enso": (
+        f"{BOM}/IDCK000072/rnino_3.4.png",
+        f"{BOM}/IDCK000072/rnino_3.4.txt",
         "relative_nino34",
         "degree_Celsius",
-        "Relative Niño3.4 sea surface temperature anomaly",
+        _RNINO,
     ),
     "relative-nino3.4": (
+        f"{BOM}/IDCK000072/rnino_3.4.png",
+        f"{BOM}/IDCK000072/rnino_3.4.txt",
         "relative_nino34",
         "degree_Celsius",
-        "Relative Niño3.4 sea surface temperature anomaly",
+        _RNINO,
     ),
     "nino3.4": (
+        f"{BOM}/IDCK000072/nino3_4.png",
+        f"{BOM}/IDCK000072/nino_3.4.txt",
         "nino34",
         "degree_Celsius",
         "Traditional Niño3.4 sea surface temperature anomaly",
     ),
-    "soi": ("soi", "1", "30-day Troup Southern Oscillation Index"),
+    "soi": (
+        f"{BOM}/IDCKGSM000/soi30.png",
+        f"{BOM}/IDCKGSM000/soi.txt",
+        "soi",
+        "1",
+        "30-day Troup Southern Oscillation Index",
+    ),
+    "roni": (
+        None,
+        f"{CPC}/RONI.ascii.txt",
+        "roni",
+        "degree_Celsius",
+        "Relative Oceanic Niño Index (3-month running relative Niño3.4 anomaly)",
+    ),
+    "cpc-relative-nino3.4-monthly": (
+        None,
+        f"{CPC}/Rnino34.ascii.txt",
+        "relative_nino34",
+        "degree_Celsius",
+        f"NOAA CPC monthly {_RNINO}",
+    ),
+    "cpc-relative-nino3.4-weekly": (
+        None,
+        f"{CPC}/rel_wksst9120.txt",
+        "relative_nino34",
+        "degree_Celsius",
+        f"NOAA CPC weekly {_RNINO}",
+    ),
 }
+MONTH = np.timedelta64(1, "M")
+RONI_SEASONS = ("DJF", "JFM", "FMA", "MAM", "AMJ", "MJJ", "JJA", "JAS", "ASO", "SON", "OND", "NDJ")
 
-INDEX_CHOICES = tuple(INDEX_FILES)
-PRODUCT_CHOICES = ("observation", "forecast")
-FORMAT_CHOICES = ("figure", "data")
+# ACCESS-S plume / JSON region token (prefix ``r`` added for operational Niño).
+FORECAST_REGIONS = {
+    "iod": "iod",
+    "enso": "nino34",
+    "nino3.4": "nino34",
+    "relative-nino3.4": "nino34",
+}
+# BoM switches Niño outlook plumes to Relative Niño filenames on this issue date.
+RNINO_START = date(2025, 7, 1)
+
 _FIGURE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
-def _browser_headers(referer: str, accept: str) -> dict[str, str]:
-    return {
-        "User-Agent": _USER_AGENT,
-        "Referer": referer,
-        "Accept": accept,
-    }
-
-
-def _open(url: str, *, referer: str, accept: str):
-    req = urllib.request.Request(url, headers=_browser_headers(referer, accept))
+def _read_url(url: str, *, referer: str, accept: str) -> tuple[bytes, str]:
+    """GET with browser headers and a cache-buster query, as the BoM pages do."""
+    headers = {"User-Agent": _USER_AGENT, "Referer": referer, "Accept": accept}
+    req = urllib.request.Request(f"{url}?{int(time.time())}", headers=headers)
     try:
-        return urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT)
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+            data = resp.read()
+            content_type = resp.headers.get("Content-Type", "")
     except urllib.error.HTTPError as exc:
         raise DataError(f"download failed for {url!r}: HTTP {exc.code} {exc.reason}") from None
     except urllib.error.URLError as exc:
         raise DataError(f"download failed for {url!r}: {exc.reason}") from None
-
-
-def _image_url(index: str) -> str:
-    if index not in INDEX_FILES:
-        raise UsageError(f"unknown --index {index!r}; choose one of: {', '.join(INDEX_CHOICES)}")
-    product, filename = INDEX_FILES[index]
-    return f"{IMG_HOST}/{product}/{filename}"
-
-
-def _obs_data_url(index: str) -> str:
-    if index not in INDEX_DATA_FILES:
-        raise UsageError(f"unknown --index {index!r}; choose one of: {', '.join(INDEX_CHOICES)}")
-    product, filename = INDEX_DATA_FILES[index]
-    return f"{IMG_HOST}/{product}/{filename}"
-
-
-def _forecast_prefix(index: str, issue: date) -> str:
-    if index == "relative-nino3.4":
-        if issue < RNINO_START:
-            raise UsageError(
-                f"--index relative-nino3.4 starts {RNINO_START.isoformat()} "
-                f"(BoM Relative Niño switch); pass --index nino3.4 or a later --date."
-            )
-        return "r"
-    if index in {"enso"} and issue >= RNINO_START:
-        return "r"
-    return ""
-
-
-def _forecast_stem(index: str, issue: date) -> str:
-    if index not in FORECAST_REGIONS:
-        raise UsageError(
-            f"--product forecast has no plume for --index {index!r}; "
-            f"choose iod, enso, nino3.4, or relative-nino3.4."
-        )
-    region = FORECAST_REGIONS[index]
-    prefix = _forecast_prefix(index, issue)
-    ymd = issue.strftime("%Y%m%d")
-    return f"{FORECAST_ARCHIVE}/{ymd}/plumes/sstOutlooks.{prefix}{region}"
-
-
-def _forecast_url(index: str, issue: date) -> str:
-    return f"{_forecast_stem(index, issue)}.hr.png"
-
-
-def _forecast_data_url(index: str, issue: date) -> str:
-    return f"{_forecast_stem(index, issue)}.json"
-
-
-def _request_url(url: str) -> str:
-    """Append a cache-buster query, matching the BoM pages."""
-    return f"{url}?{int(time.time())}"
-
-
-def _parse_archive_dates(payload: dict) -> list[date]:
-    try:
-        rows = payload["archive_index"]["data"]["index"]
-    except (KeyError, TypeError) as exc:
-        raise DataError(
-            "BoM outlook archive_index.json is missing archive_index.data.index"
-        ) from exc
-    dates: list[date] = []
-    for row in rows:
-        raw = row.get("init_date") if isinstance(row, dict) else None
-        if not raw:
-            continue
-        dates.append(date.fromisoformat(str(raw)))
-    if not dates:
-        raise DataError("BoM outlook archive_index.json listed no init dates.")
-    return sorted(dates)
-
-
-def _archive_dates() -> list[date]:
-    req_url = _request_url(ARCHIVE_INDEX_URL)
-    with _open(req_url, referer=FORECAST_PAGE, accept="application/json,text/plain,*/*") as resp:
-        payload = json.load(resp)
-    return _parse_archive_dates(payload)
-
-
-def _resolve_issue_date(when: date | None, dates: list[date]) -> date:
-    if not dates:
-        raise DataError("BoM outlook archive listed no ACCESS-S issue dates.")
-    if when is None:
-        return dates[-1]
-    candidates = [d for d in dates if d <= when]
-    if not candidates:
-        raise UsageError(
-            f"--date {when.isoformat()} is before the ACCESS-S outlook archive "
-            f"(first issue {dates[0].isoformat()})."
-        )
-    return candidates[-1]
-
-
-def _observation_mtime(url: str) -> date | None:
-    req = urllib.request.Request(
-        url,
-        method="HEAD",
-        headers=_browser_headers(OBS_PAGE, "*/*"),
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
-            raw = resp.headers.get("Last-Modified")
-    except (urllib.error.HTTPError, urllib.error.URLError):
-        return None
-    if not raw:
-        return None
-    try:
-        parsed = parsedate_to_datetime(raw)
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC).date()
-
-
-def _read_url(url: str, *, referer: str, accept: str) -> tuple[bytes, str]:
-    req_url = _request_url(url)
-    with _open(req_url, referer=referer, accept=accept) as resp:
-        data = resp.read()
-        content_type = resp.headers.get("Content-Type", "")
     if not data:
         raise DataError(f"download of {url!r} returned an empty body.")
     return data, content_type
 
 
-def _download(url: str, dest: Path, *, referer: str = OBS_PAGE) -> None:
-    data, content_type = _read_url(url, referer=referer, accept="image/png,image/*;q=0.8,*/*;q=0.5")
-    if data[:8] != b"\x89PNG\r\n\x1a\n":
-        raise DataError(
-            f"downloaded {url!r} is not a PNG (content-type={content_type!r}, size={len(data)})."
+def _archive_dates() -> list[date]:
+    """Sorted ACCESS-S outlook issue dates from the BoM archive index."""
+    raw, _ = _read_url(
+        ARCHIVE_INDEX_URL, referer=FORECAST_PAGE, accept="application/json,text/plain,*/*"
+    )
+    try:
+        rows = json.loads(raw)["archive_index"]["data"]["index"]
+        dates = sorted(
+            date.fromisoformat(str(row["init_date"]))
+            for row in rows
+            if isinstance(row, dict) and row.get("init_date")
         )
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(data)
-
-
-def _expand_palette_png(path: Path) -> None:
-    """Rewrite 8-bit palette PNGs as RGB before provenance stamping.
-
-    BoM IOD / ENSO graphs are 256-color palettes. Opening one, compositing the
-    official mark, and converting back to ``P`` requantizes nearby fills — the
-    pastel positive (pink) and negative (blue) bands become one purple. RGB
-    survives that stamp path without merging colors.
-    """
-    from PIL import Image
-
-    with Image.open(path) as img:
-        if img.mode not in {"P", "PA"}:
-            return
-        rgb = img.convert("RGBA").convert("RGB")
-    rgb.save(path)
-
-
-def _parse_ymd(raw: str) -> date:
-    try:
-        return datetime.strptime(raw, "%Y%m%d").replace(tzinfo=UTC).date()
-    except ValueError as exc:
-        raise DataError(f"unrecognized BoM date {raw!r} (expected YYYYMMDD).") from exc
-
-
-def _parse_float(raw: str) -> float:
-    token = raw.strip()
-    if token.lower() in {"nan", ""}:
-        return float("nan")
-    try:
-        return float(token)
-    except ValueError as exc:
-        raise DataError(f"unrecognized BoM numeric value {raw!r}.") from exc
-
-
-def _parse_obs_text(text: str) -> tuple[np.ndarray, np.ndarray]:
-    """Parse ``start,end,value`` clim_data rows into week-end times and values."""
-    if text.lstrip().startswith("<"):
-        raise DataError("BoM index text download returned HTML, not CSV values.")
-    times: list[np.datetime64] = []
-    values: list[float] = []
-    for line_no, line in enumerate(text.splitlines(), start=1):
-        row = line.strip()
-        if not row or row.startswith("#"):
-            continue
-        parts = [p.strip() for p in row.split(",")]
-        if len(parts) < 3:
-            raise DataError(f"BoM index text line {line_no} is not start,end,value: {row!r}")
-        end = _parse_ymd(parts[1])
-        times.append(np.datetime64(end.isoformat(), "ns"))
-        values.append(_parse_float(parts[2]))
-    if not times:
-        raise DataError("BoM index text listed no values.")
-    return np.asarray(times), np.asarray(values, dtype=np.float64)
-
-
-def _obs_interval(index: str) -> str:
-    return "1 day" if index == "soi" else "7 day"
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DataError(f"BoM outlook archive_index.json is malformed: {exc!r}") from exc
+    if not dates:
+        raise DataError("BoM outlook archive_index.json listed no init dates.")
+    return dates
 
 
 def _obs_dataset(index: str, text: str) -> xr.Dataset:
-    name, units, long_name = INDEX_VARS[index]
-    times, values = _parse_obs_text(text)
-    ds = xr.Dataset({name: ("time", values)}, coords={"time": times})
+    """Parse an observation text series into a ``(time)`` dataset."""
+    if text.lstrip().startswith("<"):
+        raise DataError(f"--index {index} download returned HTML, not the text series.")
+    times, values, bounds = [], [], []
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        parts = line.replace(",", " ").split()
+        # Data rows start with a season name (RONI) or a digit; skip titles and headers.
+        if not parts or not (parts[0] in RONI_SEASONS or parts[0][0].isdigit()):
+            continue
+        try:
+            if index == "roni":  # SEAS YR ANOM; DJF of year Y runs Dec Y-1 to Feb Y
+                start = (
+                    np.datetime64(f"{parts[1]}-01", "M")
+                    + (RONI_SEASONS.index(parts[0]) - 1) * MONTH
+                )
+                times.append(start + MONTH)
+                bounds.append((start, start + 3 * MONTH))
+                value = parts[2]
+            elif index == "cpc-relative-nino3.4-monthly":  # YR MTH ANOM
+                start = np.datetime64(f"{int(parts[0]):04d}-{int(parts[1]):02d}", "M")
+                times.append(start)
+                bounds.append((start, start + MONTH))
+                value = parts[2]
+            elif index == "cpc-relative-nino3.4-weekly":  # DDMONYYYY n12 n3 n34 n4
+                week = datetime.strptime(parts[0], "%d%b%Y").replace(tzinfo=UTC)
+                times.append(np.datetime64(week.date().isoformat()))
+                value = parts[3]
+            else:  # BoM: week_start,week_end,value (YYYYMMDD); keep week_end
+                end = parts[1]
+                times.append(np.datetime64(f"{end[:4]}-{end[4:6]}-{end[6:8]}"))
+                value = parts[2]
+            values.append(float(value))
+        except (ValueError, IndexError) as exc:
+            raise DataError(f"--index {index} line {line_no} is not a data row: {line!r}") from exc
+    if not times:
+        raise DataError(f"--index {index} text series listed no values.")
+
+    graph, _, name, units, long_name = INDICES[index]
+    data = np.asarray(values, dtype=np.float64)
+    data[data <= -99] = np.nan  # CPC marks missing as -99.9
+    ds = xr.Dataset({name: ("time", data)}, coords={"time": np.asarray(times, "datetime64[ns]")})
     ds[name].attrs.update(long_name=long_name, units=units)
     if index != "soi":
         ds[name].attrs["standard_name"] = "sea_surface_temperature_anomaly"
+    ds[name].attrs["comment"] = {
+        "soi": "30-day rolling Troup SOI; time is the window end date.",
+        "roni": "Overlapping 3-month seasons; time is the middle month, time_bounds the season.",
+        "cpc-relative-nino3.4-monthly": "Monthly ERSSTv5 index; time is the first of the month.",
+        "cpc-relative-nino3.4-weekly": "Weekly OISST index; time is the week's centre date.",
+    }.get(index, "Weekly index; time is the week-ending date.")
     stamp_cf_coords(ds)
-    if index == "soi":
-        ds[name].attrs["comment"] = "30-day rolling Troup SOI; time is the window end date."
-    else:
-        ds[name].attrs["comment"] = "Weekly index; time is the week-ending date."
-    ds.attrs.update(Conventions="CF-1.13", weather_skills_source="bom")
-    return stamp_data_interval(ds, period=_obs_interval(index))
-
-
-def _parse_month_label(label: str) -> date:
-    try:
-        return datetime.strptime(label.strip(), "%b %Y").replace(tzinfo=UTC).date().replace(day=1)
-    except ValueError as exc:
-        raise DataError(f"unrecognized BoM month label {label!r} (expected 'Mon YYYY').") from exc
-
-
-def _frequency_bucket(label: str) -> str:
-    key = label.lower().replace("\u2212", "-").strip()
-    if key.startswith("below"):
-        return "below"
-    if key.startswith("above"):
-        return "above"
-    if key.startswith("neutral"):
-        return "neutral"
-    raise DataError(f"unrecognized ACCESS-S frequency bucket {label!r}.")
-
-
-def _parse_forecast_json(payload: dict) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
-    try:
-        block = payload["data"]
-        mean = block["mean"]
-        frequency = block["frequency"]
-    except (KeyError, TypeError) as exc:
-        raise DataError("ACCESS-S outlook JSON is missing data.mean / data.frequency.") from exc
-    if not isinstance(mean, dict) or not mean:
-        raise DataError("ACCESS-S outlook JSON listed no monthly mean values.")
-    labels = list(mean)
-    times = np.array(
-        [np.datetime64(_parse_month_label(label).isoformat(), "ns") for label in labels]
-    )
-    means = np.array([_parse_float(str(mean[label])) for label in labels], dtype=np.float64)
-    buckets = {"below": [], "neutral": [], "above": []}
-    for label in labels:
-        row = frequency.get(label) if isinstance(frequency, dict) else None
-        if not isinstance(row, dict):
-            raise DataError(f"ACCESS-S outlook JSON is missing frequency for {label!r}.")
-        found: dict[str, float] = {}
-        for raw_key, raw_val in row.items():
-            found[_frequency_bucket(str(raw_key))] = _parse_float(str(raw_val))
-        for bucket, values in buckets.items():
-            if bucket not in found:
-                raise DataError(
-                    f"ACCESS-S outlook JSON frequency for {label!r} is missing {bucket}."
-                )
-            values.append(found[bucket])
-    freqs = {name: np.asarray(vals, dtype=np.float64) for name, vals in buckets.items()}
-    return times, means, freqs
-
-
-def _next_month(day: date) -> date:
-    if day.month == 12:
-        return date(day.year + 1, 1, 1)
-    return date(day.year, day.month + 1, 1)
-
-
-def _month_time_bounds(times: np.ndarray) -> np.ndarray:
-    """CF ``(time, 2)`` bounds: first of month through first of next month."""
-    bounds = []
-    for raw in times:
-        start = date.fromisoformat(str(np.datetime64(raw, "D")))
-        end = _next_month(start)
-        bounds.append(
-            [
-                np.datetime64(start.isoformat(), "ns"),
-                np.datetime64(end.isoformat(), "ns"),
-            ]
-        )
-    return np.asarray(bounds, dtype="datetime64[ns]")
+    ds.attrs.update(Conventions="CF-1.13", weather_skills_source="bom" if graph else "noaa-cpc")
+    if bounds:
+        # Months vary in length and RONI seasons overlap: time_bounds, not data_interval.
+        ds = ds.assign_coords(time_bounds=(("time", "nv"), np.asarray(bounds, "datetime64[ns]")))
+        ds["time"].attrs["bounds"] = "time_bounds"
+        return ds
+    return stamp_data_interval(ds, period="1 day" if index == "soi" else "7 day")
 
 
 def _forecast_dataset(index: str, issue: date, payload: dict) -> xr.Dataset:
-    # Before the Relative Niño switch, --index enso fetches the traditional Niño3.4 plume.
-    if index == "enso" and _forecast_prefix(index, issue) == "":
-        index = "nino3.4"
-    name, units, long_name = INDEX_VARS[index]
-    times, means, freqs = _parse_forecast_json(payload)
+    """ACCESS-S monthly ensemble mean and below / neutral / above percentages."""
+    months, means = [], []
+    probs = {"below": [], "neutral": [], "above": []}
+    try:
+        frequency = payload["data"]["frequency"]
+        for label, mean in payload["data"]["mean"].items():
+            month = datetime.strptime(label.strip(), "%b %Y").replace(tzinfo=UTC)
+            months.append(np.datetime64(f"{month:%Y-%m}", "M"))
+            means.append(float(mean))
+            # Keys look like "below −0.4", "neutral", "above 0.4".
+            row = {key.split()[0].lower(): float(v) for key, v in frequency[label].items()}
+            for bucket, column in probs.items():
+                column.append(row[bucket])
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
+        raise DataError(f"ACCESS-S outlook JSON is malformed: {exc!r}") from exc
+    if not months:
+        raise DataError("ACCESS-S outlook JSON listed no monthly mean values.")
+
+    _, _, name, units, long_name = INDICES[index]
+    months = np.asarray(months)
     ds = xr.Dataset(
-        {
-            name: ("time", means),
-            "prob_below": ("time", freqs["below"]),
-            "prob_neutral": ("time", freqs["neutral"]),
-            "prob_above": ("time", freqs["above"]),
+        {name: ("time", np.asarray(means, dtype=np.float64))}
+        | {
+            f"prob_{bucket}": ("time", np.asarray(col, dtype=np.float64))
+            for bucket, col in probs.items()
         },
         coords={
-            "time": times,
+            "time": months.astype("datetime64[ns]"),
             "init_time": np.datetime64(issue.isoformat(), "ns"),
-            "time_bounds": (("time", "nv"), _month_time_bounds(times)),
+            "time_bounds": (
+                ("time", "nv"),
+                np.stack([months, months + MONTH], axis=1).astype("datetime64[ns]"),
+            ),
         },
     )
     ds[name].attrs.update(
         long_name=f"ACCESS-S ensemble-mean {long_name}",
         units=units,
+        standard_name="sea_surface_temperature_anomaly",
         comment="Monthly ensemble mean from the BoM outlooks JSON, not the 99-member plume.",
     )
-    if index != "soi":
-        ds[name].attrs["standard_name"] = "sea_surface_temperature_anomaly"
     stamp_cf_coords(ds)
-    for var, phrase in (
-        ("prob_below", "below the event threshold"),
-        ("prob_neutral", "in the neutral range"),
-        ("prob_above", "above the event threshold"),
+    for bucket, phrase in (
+        ("below", "below the event threshold"),
+        ("neutral", "in the neutral range"),
+        ("above", "above the event threshold"),
     ):
-        ds[var].attrs.update(
-            long_name=f"ACCESS-S ensemble percent {phrase}",
-            units="percent",
+        ds[f"prob_{bucket}"].attrs.update(
+            long_name=f"ACCESS-S ensemble percent {phrase}", units="percent"
         )
     ds["init_time"].attrs.update(
-        standard_name="forecast_reference_time",
-        long_name="ACCESS-S outlook issue date",
+        standard_name="forecast_reference_time", long_name="ACCESS-S outlook issue date"
     )
+    # Month lengths vary; CF time_bounds describe the cells, so no scalar data_interval.
     ds["time"].attrs["bounds"] = "time_bounds"
     ds.attrs.update(Conventions="CF-1.13", weather_skills_source="bom")
-    # Month lengths vary; CF time_bounds already describe the cells. Do not
-    # infer a scalar data_interval (fails on a single-month table).
     return ds
-
-
-def _resolve_output_format(output_format: str | None, output) -> str:
-    suffix = Path(output).suffix.lower() if output is not None else ""
-    if output_format is None:
-        return "data" if suffix == ".zarr" else "figure"
-    if output_format == "data" and suffix in _FIGURE_SUFFIXES:
-        raise UsageError("--format data writes a Zarr; pass -o with a .zarr suffix.")
-    if output_format == "figure" and suffix == ".zarr":
-        raise UsageError("--format figure writes a PNG; pass -o with a .png suffix.")
-    return output_format
 
 
 @weather_skill(name="iod-enso-fetch", version=_SKILL_VERSION)
 @weather_skill.argument(
     "--index",
     required=True,
-    choices=list(INDEX_CHOICES),
+    choices=list(INDICES),
     help=(
         "Index: iod (weekly DMI), enso / relative-nino3.4 "
         "(operational Relative Niño3.4), nino3.4 (traditional), or soi "
-        "(30-day SOI; observation only)."
+        "(30-day SOI; observation only), or roni (NOAA CPC 3-month Relative "
+        "Oceanic Niño Index from 1950), cpc-relative-nino3.4-monthly (NOAA CPC "
+        "monthly relative Niño3.4 from 1949-12), or cpc-relative-nino3.4-weekly "
+        "(NOAA CPC weekly relative Niño3.4 from 1981). CPC indices are Zarr data only."
     ),
 )
 @weather_skill.argument(
     "--product",
     default="observation",
-    choices=list(PRODUCT_CHOICES),
+    choices=["observation", "forecast"],
     help=(
         "observation (default): current monitoring timeseries. "
         "forecast: ACCESS-S plume or monthly outlook table from the archive."
@@ -480,7 +306,7 @@ def _resolve_output_format(output_format: str | None, output) -> str:
 @weather_skill.argument(
     "--format",
     dest="output_format",
-    choices=list(FORMAT_CHOICES),
+    choices=["figure", "data"],
     help=(
         "figure (PNG graph or plume) or data (Zarr of official index values). "
         "Default: data when -o ends in .zarr, otherwise figure."
@@ -506,94 +332,125 @@ def _resolve_output_format(output_format: str | None, output) -> str:
     ),
 )
 def fetch(index, product, date, output, output_format, probe_latest, **kwargs):
-    """Download Bureau of Meteorology IOD and ENSO graphs, index values, or ACCESS-S outlooks."""
-    # Observation products are the current overwritten clim_data timeseries
-    # (https://www.bom.gov.au/climate/enso/). Forecasts are ACCESS-S plumes
-    # and monthly mean / category-frequency tables from
-    # https://www.bom.gov.au/climate/ocean/outlooks/ (dated archive;
-    # omit ``--date`` for the latest issue).
-    if product not in PRODUCT_CHOICES:
+    """Download BoM and NOAA CPC IOD / ENSO index values or graphs, or BoM ACCESS-S outlooks."""
+    if probe_latest:
         raise UsageError(
-            f"unknown --product {product!r}; choose one of: {', '.join(PRODUCT_CHOICES)}"
+            f"--probe-latest takes no value (got {probe_latest!r}); "
+            "choose the series with --index and --product."
         )
+    graph, text_url, *_ = INDICES[index]
 
-    kind = _resolve_output_format(output_format, output)
-
-    if probe_latest is not None:
-        if probe_latest:
+    suffix = Path(output).suffix.lower() if output is not None else ""
+    kind = output_format or ("data" if suffix == ".zarr" else "figure")
+    if kind == "data" and suffix in _FIGURE_SUFFIXES:
+        raise UsageError("--format data writes a Zarr; pass -o with a .zarr suffix.")
+    if kind == "figure" and suffix == ".zarr":
+        raise UsageError("--format figure writes a PNG; pass -o with a .png suffix.")
+    if graph is None:
+        if product == "forecast" or output_format == "figure" or suffix not in {"", ".zarr"}:
             raise UsageError(
-                f"--probe-latest takes no value (got {probe_latest!r}); "
-                "choose the series with --index and --product."
+                f"--index {index} is NOAA observation data only; "
+                "pass --product observation and -o OUT.zarr."
             )
-        if product == "forecast":
-            latest = _resolve_issue_date(None, _archive_dates())
-            print(latest.isoformat())
-        else:
-            url = _obs_data_url(index) if kind == "data" else _image_url(index)
-            latest = _observation_mtime(url)
-            print(latest.isoformat() if latest is not None else "none")
-        return
+        kind = "data"
 
-    if product == "observation":
-        if date is not None:
+    if product == "forecast":
+        if index not in FORECAST_REGIONS:
             raise UsageError(
-                "Observation products are current-only (BoM overwrites the same "
-                "file in place). For a dated ACCESS-S forecast pass "
-                "--product forecast --date YYYY-MM-DD."
+                f"--product forecast has no plume for --index {index!r}; "
+                "choose iod, enso, nino3.4, or relative-nino3.4."
             )
-        if kind == "figure":
-            url = _image_url(index)
-            referer = OBS_PAGE
-            print(f"Fetching {product} {index} figure: {url}", file=sys.stderr)
-        else:
-            url = _obs_data_url(index)
-            print(f"Fetching {product} {index} data: {url}", file=sys.stderr)
-            text, content_type = _read_url(
-                url, referer=OBS_PAGE, accept="text/plain,text/*;q=0.8,*/*;q=0.5"
+        dates = _archive_dates()
+        earlier = [d for d in dates if date is None or d <= date]
+        if not earlier:
+            raise UsageError(
+                f"--date {date.isoformat()} is before the ACCESS-S outlook archive "
+                f"(first issue {dates[0].isoformat()})."
             )
-            try:
-                decoded = text.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise DataError(
-                    f"downloaded {url!r} is not UTF-8 text "
-                    f"(content-type={content_type!r}, size={len(text)})."
-                ) from exc
-            return _obs_dataset(index, decoded)
-    else:
-        issue = _resolve_issue_date(date, _archive_dates())
+        issue = earlier[-1]
+        if probe_latest is not None:
+            print(issue.isoformat())
+            return
         if date is not None and issue != date:
             print(
                 f"Note: no ACCESS-S issue on {date.isoformat()}; using {issue.isoformat()}.",
                 file=sys.stderr,
             )
-        if kind == "figure":
-            url = _forecast_url(index, issue)
-            referer = FORECAST_PAGE
-            print(
-                f"Fetching {product} {index} figure issue {issue.isoformat()}: {url}",
-                file=sys.stderr,
+        if index == "relative-nino3.4" and issue < RNINO_START:
+            raise UsageError(
+                f"--index relative-nino3.4 starts {RNINO_START.isoformat()} "
+                "(BoM Relative Niño switch); pass --index nino3.4 or a later --date."
             )
-        else:
-            url = _forecast_data_url(index, issue)
-            print(
-                f"Fetching {product} {index} data issue {issue.isoformat()}: {url}",
-                file=sys.stderr,
+        relative = index in {"enso", "relative-nino3.4"} and issue >= RNINO_START
+        stem = (
+            f"{FORECAST_ARCHIVE}/{issue:%Y%m%d}/plumes/"
+            f"sstOutlooks.{'r' if relative else ''}{FORECAST_REGIONS[index]}"
+        )
+        url = f"{stem}.json" if kind == "data" else f"{stem}.hr.png"
+        referer = FORECAST_PAGE
+    else:
+        if date is not None:
+            raise UsageError(
+                "Observation products are current-only (the source overwrites the same "
+                "file in place). For a dated ACCESS-S forecast pass "
+                "--product forecast --date YYYY-MM-DD."
             )
-            raw, content_type = _read_url(
-                url, referer=FORECAST_PAGE, accept="application/json,text/plain,*/*"
-            )
+        url = text_url if kind == "data" else graph
+        referer = OBS_PAGE if graph else CPC_PAGE
+        if probe_latest is not None:
+            # The file's Last-Modified day is the latest update.
+            headers = {"User-Agent": _USER_AGENT, "Referer": referer, "Accept": "*/*"}
+            req = urllib.request.Request(url, method="HEAD", headers=headers)
             try:
-                payload = json.loads(raw.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise DataError(
-                    f"downloaded {url!r} is not JSON "
-                    f"(content-type={content_type!r}, size={len(raw)})."
-                ) from exc
-            return _forecast_dataset(index, issue, payload)
+                with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+                    modified = parsedate_to_datetime(resp.headers.get("Last-Modified"))
+                if modified.tzinfo is None:
+                    modified = modified.replace(tzinfo=UTC)
+                print(modified.astimezone(UTC).date().isoformat())
+            except (urllib.error.URLError, TypeError, ValueError):
+                print("none")
+            return
 
+    print(f"Fetching {product} {index} {kind}: {url}", file=sys.stderr)
+    if kind == "figure":
+        accept = "image/png,image/*;q=0.8,*/*;q=0.5"
+    elif product == "forecast":
+        accept = "application/json,text/plain,*/*"
+    else:
+        accept = "text/plain,text/*;q=0.8,*/*;q=0.5"
+    raw, content_type = _read_url(url, referer=referer, accept=accept)
+
+    if kind == "data":
+        try:
+            text = raw.decode("utf-8")
+            if product == "observation":
+                return _obs_dataset(index, text)
+            payload = json.loads(text)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DataError(
+                f"downloaded {url!r} is not UTF-8 text or JSON "
+                f"(content-type={content_type!r}, size={len(raw)})."
+            ) from exc
+        # Before the Relative Niño switch, --index enso is the traditional Niño3.4 plume.
+        return _forecast_dataset(
+            "nino3.4" if index == "enso" and not relative else index, issue, payload
+        )
+
+    if raw[:8] != _PNG_SIGNATURE:
+        raise DataError(
+            f"downloaded {url!r} is not a PNG (content-type={content_type!r}, size={len(raw)})."
+        )
     output = Path(output)
-    _download(url, output, referer=referer)
-    _expand_palette_png(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    from PIL import Image
+
+    # BoM graphs are 256-colour palettes; provenance stamping would requantize them and
+    # merge the pink and blue fills, so save palette PNGs as RGB first.
+    with Image.open(io.BytesIO(raw)) as img:
+        if img.mode in {"P", "PA"}:
+            img.convert("RGBA").convert("RGB").save(output)
+        else:
+            output.write_bytes(raw)
     return output
 
 

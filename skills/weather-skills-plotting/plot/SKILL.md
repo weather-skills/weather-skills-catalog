@@ -1,195 +1,158 @@
 ---
 name: plot
-description: "Draw weather-skills Zarrs as maps (heatmap, contour, stations, wind arrows), time series, xy scatter plots, wind roses, forecast verification grids (obs, lead-week forecasts and their hits / bias / MAE maps), ECMWF-style mediograms (forecast vs model-climate ensembles at a point), or animated maps through time, saved as PNG, JPG, interactive HTML, or GIF. Titles, colors, panels, and layout are set with a standard Plotly figure JSON."
+description: "Draw weather-skills Zarrs as any Plotly figure: maps (heatmap, contour, stations, wind arrows), panel grids, time series, ensemble plumes and bands, day-of-year season overlays, bars, xy scatter, cross-sections, and animated maps, saved as PNG, JPG, PDF, SVG, interactive HTML, or GIF. The spec is Jsonnet that evaluates to a standard Plotly figure; strings starting with @ name the data."
 license: MIT
-compatibility: Requires Python 3.12 and uv. PNG/JPG export needs Chrome (installed, or `plotly_get_chrome -y`). Self-contained; the plotting library ships in scripts/.
+compatibility: Requires Python 3.12 and uv. PNG, JPG, PDF, SVG and GIF export needs Chrome (installed, or `plotly_get_chrome -y`). Self-contained; the plotting library ships in scripts/.
 allowed-tools: Bash(uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py *)
 metadata:
-  version: "1.0.3"
+  version: "2.0.5"
   catalog-group: figure
 ---
 
 # plot
 
-Draws one or more Zarrs as a figure. Name the files on the command line; set titles, colors, and layout in `--spec`.
+Draws a figure from a Jsonnet spec. The spec evaluates to a standard [Plotly figure](https://plotly.com/python/reference/) (`data`, `layout`, `frames`). Wherever Plotly expects data, write a string that starts with `@` and names it: `'@OBS.precip.isel(time=0)'`. Name every input on the command line.
+
+## Data comes from the inputs, never from you
+
+Every value the figure shows as data comes from an input through an `@` reference: grid values, station readings, scores, counts, means, table cells, bar heights, colours on a scale, numbers printed on cells or points. Never type data into the spec, whether you read it from a file, computed it, copied it from another tool's output or remember it. That holds even where the lint would let it through (a few points in a scatter, `text`, annotations). The figure records the inputs that made it and is stamped as traceable; typed-in data makes that record false.
+
+Typed in by hand, only:
+- words: titles, axis titles, legend names, category and tick labels, units, notes, sources;
+- the positions of marks placed by hand: a town pin, a line at a date or a border, a threshold (better as `--const NAME=VALUE`, so it is recorded).
+
+To print a value on a cell or point, bind the data and format it with `texttemplate` (`'%{z:.1f}%'`); never write the number into `text`. If the values you need are not in a Zarr yet, make one with the skills (verify, aggregate, concat, …) and bind it. If no skill can make them, say so rather than draw them.
+
+## How a figure is made: spec → render → lint → bind → export
+
+1. **Spec.** You write Jsonnet: Plotly keys for everything drawn, and an `@` reference wherever data goes (`x: '@OBS.lon'`, `z: '@OBS.precip.isel(time=0)'`). Each input is named with `-i FILE=NAME`; `std.extVar('inputs')` describes them (dims, variables, dates, bbox) for loops and titles.
+2. **Render.** plot evaluates the Jsonnet into plain Plotly JSON, references still unbound. `--dump-spec -` prints this.
+3. **Lint.** Before any data is read, the JSON is checked against Plotly's schema: every key that can put data on the chart must hold an `@` reference, never typed-in values. That covers data keys (`x`, `y`, `z`, `lat`, `customdata`, `values`, …), per-point lists in keys like `marker.color`, `marker.size` and `text` (one value there is styling), keys that generate a value for every point (`x0` / `dx`, `base`, error-bar `value`), the coordinates of images on a data axis (`xref: 'x'`), menu and slider `args`, frames and templates. Keys Plotly doesn't define are refused, since they can't be checked. Every problem is listed at once. Shapes and annotations are marks placed by hand, so their positions may be typed in (`x0: 36`, `x: '2026-10-31'`), or passed as `--const NAME=VALUE` and written `'@const.NAME'` when they should be recorded or change from run to run.
+4. **Bind.** Each reference is resolved from its input: it selects, reshapes or labels stored values, or scales a marker's size in pixels (see `@` references below), and its shape is checked against the key.
+5. **Export.** Plotly validates the figure, and it is written to each `-o` with its QA lines (see Output).
 
 ## Usage
 
 ```bash
-# One map (or one panel per time / step)
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py -i rain.zarr -o rain.png
-# Maps side by side, each on its own grid
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py -i chirps.zarr=OBS -i ecmwf.zarr=FC -o compare.png
-# Area means or stations as lines on one time axis
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py -i chirps_area.zarr -i imerg_area.zarr -o rain.png
-# Layers on one map, bottom first
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py --layer heatmap:rain.zarr --layer scatter:stations.zarr --layer outline:kenya.geojson -o map.png
-# One variable against another
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py -i iod_rain.zarr -o iod_vs_rain.png --spec '{"data": [{"uid": "0", "meta": {"x": "dmi", "y": "precip"}}]}'
-# Verification grid: obs, then each lead's forecast and verify map
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py --obs chirps_week.zarr --forecast ecmwf_w1.zarr --verify verify_w1.zarr --forecast ecmwf_w2.zarr --verify verify_w2.zarr -o verify.png
-# Mediogram: forecast ensemble vs model climate at one point
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py --mediogram -i forecast.zarr -i mclimate.zarr -o mediogram.png --spec '{"layout": {"meta": {"geo": {"point": {"lat": -1.3, "lon": 36.8}}}}}'
-# Any map animated through time, as interactive HTML: here rain under isobars, inside an outline
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py --animate --layer heatmap:rain_daily.zarr --layer contour:msl_daily.zarr --layer outline:kenya.geojson -o rain.html
-# The same animation as a looping GIF, for slides or chat
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py --animate -i rain_daily.zarr -o rain.gif
+uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py -i rain_week.zarr=OBS -i kitui.geojson=REGION \
+  --spec map.jsonnet -o map.png
 ```
 
-The plot type follows the data: a lat/lon grid is a colored map, stations are colored markers, 1-D series are lines on one time axis. `meta.x` / `meta.y` scatter two variables or coordinates; a name coordinate such as `county` becomes a category axis (a dot chart: `"meta": {"x": "precip_7d", "y": "county"}`). `--obs`/`--forecast`/`--verify` and `--mediogram` pick the two special figures (sections below); `--animate` plays any map through time instead of drawing side-by-side panels. Use one of the three at a time.
+Start from a recipe. `--recipe` lists them, `--recipe NAME` prints one to copy and edit, and `--spec NAME` runs one as is (its `// plot.py …` comment line is the command; the files are in `${CLAUDE_SKILL_DIR}/recipes/`).
+
+| Recipe | Draws |
+| --- | --- |
+| `map.jsonnet` | One map: a grid on a stepped palette, the base map, and a county or polygon outlined from GeoJSON |
+| `stations.jsonnet` | Station dots over a grid on one colorbar, labelled with their ids |
+| `panels.jsonnet` | One map per forecast step in a grid, one colorbar, panel titles |
+| `members.jsonnet` | Ensemble members in grey and the mean in bold, at the cell nearest a point |
+| `band.jsonnet` | A shaded 10–90% band between two quantile lines, with observations |
+| `sd_band.jsonnet` | Mean ± 1 SD as a shaded band (stacked fills), with the mean as a line |
+| `seasons.jsonnet` | Past years and a forecast plume on one day-of-year axis |
+| `wind_markers.jsonnet` | Wind arrows as Plotly markers sized in pixels by speed (`@…speed * k`), with no extra data step |
+| `animation.jsonnet` | A map played through time: HTML with play / slider, or a looping GIF |
+| `cross_section.jsonnet` | A field over longitude and pressure, 1000 hPa at the bottom |
+| `bars.jsonnet` | Horizontal bars per county from a name coordinate |
+| `scatter_xy.jsonnet` | One variable against another, with year labels and a threshold line |
+| `verify_grid.jsonnet` | Observation and each lead's forecast on one colorbar, verify hits maps underneath |
+| `mediogram.jsonnet` | Forecast members vs model climate as boxes per lead at a point, with the forecast mean |
+| `windrose.jsonnet` | Wind observations on polar axes by the direction they blow from, colored by speed |
+| `mslp.jsonnet` | Labelled isobars every 4 hPa with H / L and central pressure from local-extrema |
 
 ### Arguments
-- `--input`, `-i` — Zarr to draw, as `PATH` or `PATH=NAME`; repeat for side-by-side maps or more lines.
-- `--layer` — `KIND:PATH` or `KIND:PATH=NAME` to stack on one map; repeat. Kinds: `heatmap`, `contour` (over a heatmap: labeled black lines, every 4 hPa for sea-level pressure; `"contours": {"coloring": "fill"}` fills it), `scatter` (stations; `"mode": "markers+text"` labels each with its `name` coordinate, else its id; local-extrema highs / lows print as a blue H / red L over the central value, restyled by a trace with that layer's uid), `quiver` (wind u/v: a speed field NAME and arrows NAME-arrows, each picking its own `isel` / `sel`), `outline` and `mask` (GeoJSON). `outline` and `mask` layers also combine with `-i` inputs (`-i grid.zarr --layer outline:counties.geojson`); `-i` itself takes Zarr paths only.
-- `--obs`, `--forecast`, `--verify` — verification grid: the observation for one week, then each lead's forecast (repeat, week-1 first) and its verify-skill output (once per `--forecast`, same order). See **Verification grid**.
-- `--mediogram` — forecast vs model climate at one point; pass `-i` twice (forecast, then m-climate). See **Mediogram**.
-- `--animate` — the same map, with its times or steps played as frames; takes the same `-i` / `--layer` inputs. `-o` must end in `.html` or `.gif`. See **Animation**.
-- `--spec` — Plotly figure JSON, inline or a file path.
-- `--theme-file` — house style: Plotly `template`, `palettes`, per-field `defaults`, element `styles`, base-map `overlays` (see Colors); or a shipped theme by name, e.g. `tropical_tidbits`.
-- `--dump-spec` — print (`-`) or save (a path) the spec, without drawing.
-- `--output`, `-o` — `.png`, `.jpg`, `.html`, or `.gif` (`--animate` only).
+- `-i`, `--input` — `PATH=NAME`, repeat. A Zarr, or a GeoJSON (`.geojson` / `.json`) of outlines. `NAME` is a letter or `_`, then letters, digits and `_` (`OBS`, `fc_week1`); it is how the spec refers to the file. Readable legend text goes in a trace's `"name"`, not here.
+- `--spec` — a `.jsonnet` / `.json` file, a recipe name (`map`), or the Jsonnet text itself.
+- `--recipe [NAME]` — list the recipes, or print one's Jsonnet; draws nothing.
+- `--const NAME=VALUE` — a constant: `'@const.NAME'` in a trace's data (a reference point) or a shape or annotation position that changes from run to run (`--const el_nino=0.5`, a date); `std.extVar('const').NAME` in text, such as a title. Numbers or text; repeat.
+- `--dpi N` — pixel density of PNG, JPG and GIF output. The layout is in CSS pixels at 96 dpi (the default); `192` doubles the pixels at the same layout, `300` is print quality. `layout.width` / `height` set the layout itself.
+- `-o`, `--output` — `.png`, `.jpg`, `.pdf`, `.svg`, `.html`, or `.gif` (plays the spec's `frames`). Repeat to write several.
+- `--dump-spec` — print (`-`) or save (a path) the evaluated spec, `@` strings unresolved, and draw nothing.
 
-### Customizing with `--spec`
-`--spec` changes the defaults. It takes [Plotly figure](https://plotly.com/python/reference/) JSON, `{"data": [...], "layout": {...}}`; write only the parts you change.
+## The spec
 
-Each input file is one entry in `data`. Name it on the command line (`-i ecmwf.zarr=FC`) and put that name in `"uid"`. Unnamed files are `"0"`, `"1"`, … in order.
+It is ordinary Jsonnet. Use `local` variables for anything repeated, so long strings (selections, colors) are written once:
 
-A trace's `uid` is its file's NAME when the file is named, else its position: `-i a.zarr=West` is `"uid": "West"`, and `"0"` then matches nothing (plot stops). Copy uids from the `-i` line, or run `--dump-spec -` to see them. NAME is an id (letters, digits, `_`); it is also the default legend and panel text until the trace sets `"name"` (legend text such as `"TAHMO (automatic)"`) or a `panel-title-N` annotation its title.
-
-```bash
-# Two named files, restyled by name: bars per county, one panel each
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py -i west.zarr=West -i east.zarr=East -o counties.png --spec '{"data": [
-  {"uid": "West", "type": "bar", "meta": {"x": "county", "y": "precip"}},
-  {"uid": "East", "type": "bar", "meta": {"x": "county", "y": "precip"}, "xaxis": "x2", "yaxis": "y2"}],
-  "layout": {"xaxis": {"domain": [0, 0.46]}, "xaxis2": {"domain": [0.54, 1]}, "yaxis2": {"anchor": "x2"}}}'
-# Named lines: legend names and colors
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py -i chirps_area.zarr=CHIRPS -i imerg_area.zarr=IMERG -o rain.png --spec '{"data": [
-  {"uid": "CHIRPS", "line": {"color": "black"}}, {"uid": "IMERG", "name": "IMERG Late", "line": {"dash": "dash"}}]}'
-# Named layers: the uid is the NAME after the path
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py --layer heatmap:rain.zarr=RAIN --layer contour:msl.zarr=MSLP -o map.png --spec '{"data": [
-  {"uid": "RAIN", "zmin": 0, "zmax": 50}, {"uid": "MSLP", "contours": {"size": 2}}]}'
+```jsonnet
+local ws = import 'ws.libsonnet';               // helpers, below
+local inputs = std.extVar('inputs');           // what each input holds
+local day = '.isel(time=0)';
+{
+  data: [
+    { type: 'heatmap', x: '@OBS.lon', y: '@OBS.lat', z: '@OBS.precip' + day, coloraxis: 'coloraxis' },
+  ],
+  layout: ws.map(inputs.OBS.bbox) + {
+    title: { text: 'Rainfall %s' % inputs.OBS.coords.time[0] },
+    coloraxis: ws.stepped(ws.palettes.ppt_day),
+  },
+}
 ```
 
-Every row below assumes `-i ecmwf.zarr=FC`.
+**Changing part of a helper's output.** With `+`, a field you name replaces the helper's field entirely; with `+:` it is merged in. `ws.map(b)` sets `margin: {l: 50, r: 150, t: 70, b: 70}`:
 
-| To | `--spec` |
+```jsonnet
+ws.map(b) + { margin: { l: 110 } }    // margin becomes {l: 110}: r, t, b are lost and the colorbar is cut off
+ws.map(b) + { margin+: { l: 110 } }   // margin becomes {l: 110, r: 150, t: 70, b: 70}: only l changes
+```
+
+Use `+:` the same way for `xaxis+:`, `coloraxis+:`, and `annotations+:` (which adds to the list instead of replacing it).
+
+**`std.extVar('inputs')`** describes each input, read from its metadata without loading data: `dims` (sizes), `vars` (each one's `dims`, `units`, `long_name`), `coords` (values of 1-D coordinates up to 400 long, and scalar ones: dates as `2026-10-01`, or `2026-10-30T12:00:00` when not midnight; leads as days, `0.125` for 3 h; members, station ids; `valid_time` when the file has it), `attrs`, and `bbox` (`{n, w, s, e}`, from lat / lon coordinates; a grid across the dateline gets `e` past 180, e.g. 150 to 210). Use it for loop bounds, titles and map windows; `ws.date(t)` turns a date into `26 Oct 2026`. A GeoJSON input has `bbox`. To see it all: `--spec "std.extVar('inputs')" --dump-spec -` with your `-i` inputs. Names here are the file's own: a grid on `latitude` / `longitude` has `dims.longitude`, not `dims.lon`; the `lat` / `lon` shorthand works only in `@` references.
+
+### `@` references
+A string that starts with `@` is replaced by the data it names; the whole string is the reference, so a reference can't sit inside other text (titles take their dates and names from `inputs`). A string that starts with `@@` is the literal text after the first `@`.
+
+| Form | Gives |
 | --- | --- |
-| Set the title | `{"layout": {"title": {"text": "Week 1"}}}` |
-| Add a second title line | `{"layout": {"title": {"text": "ECMWF rainfall", "subtitle": {"text": "Week 1: 16–22 Oct"}}}}` or `<br>` in `text` |
-| Title a panel | `{"layout": {"annotations": [{"name": "panel-title-2", "text": "ECMWF"}]}}` |
-| Pick one step | `{"data": [{"uid": "FC", "meta": {"source": {"isel": {"step": 0}}}}]}` |
-| Pick the variable to draw | `{"data": [{"uid": "FC", "meta": {"source": {"variable": "iod_mode_index"}}}]}` |
-| Set the color range | `{"data": [{"uid": "FC", "zmin": 0, "zmax": 100}]}` |
-| Set the map window | `{"layout": {"meta": {"geo": {"bbox": [5.5, 33.5, -5, 42.5]}}}}` |
-| Draw contours | `{"data": [{"uid": "FC", "type": "contour"}]}` |
+| `@OBS.precip`, `@OBS.time`, `@OBS.county` | A variable or coordinate |
+| `@OBS.lat`, `@OBS.lon` | The latitude / longitude coordinate, whatever the file calls it |
+| `.isel(time=0)`, `.isel(time=-1)`, `.isel(time=slice(0, 7))` | Pick by position (`slice(None, None, 3)`: every 3rd) |
+| `.sel(time='2026-10-01')`, `.sel(lat=-1.3, lon=36.8, method='nearest')`, `.sel(station_id=['A', 'B'])` | Pick by value |
+| `.dropna('station_id')` | Keep the positions along a dim that have a value (this map's local-extrema centres) |
+| `.lon`, `.lat`, `.time`, any coordinate, after a selection | That coordinate of what is left: `@HI.msl.isel(time=0).dropna('station_id').lon` |
+| `.squeeze()`, `.transpose('vertical', 'lon')` | Drop size-1 dims, set dim order (pick every other dim first) |
+| `.lon360()`, `.lon180()` | A field whose window crosses the edge of its longitudes, drawn in one piece. A file stored as -180 to 180 jumps from 180 back to -180 at the dateline, so a Pacific map (170°E to 170°W) would split into two strips at the sides; `.lon360()` relabels the longitudes 0 to 360 and puts the columns in order. A file stored as 0 to 360 does the same at the prime meridian (Africa from 340 to 40); `.lon180()` relabels them -180 to 180. Use it on the field and on its longitudes: `z: '@X.sst.isel(time=0).lon360()'`, `x: '@X.sst.isel(time=0).lon360().lon'`. `inputs.X.bbox` already gives the unbroken window, and `ws.map` / `ws.grid` label a window past 180° as 170°E, 180°, 170°W |
+| `.flat()`, `.flat('lon')`, `.flat('step')` | A 2-D selection as one value per cell, and a dim's coordinate for each value (leads in days): grid cells as scatter points, or every member with its lead for one box per lead |
+| `.dt.dayofyear`, `.dt.year`, `.dt.month`, `.dt.day`, `.dt.hour`, `.dt.days`, `.dt.strftime('%d %b')` | Time labels (`.dt.days` of a lead time) |
+| `.attrs.units` | A text attribute |
+| `… * 2`, `… / 3 + 4`, `… * const.k` | A marker size in pixels: data + − × ÷ a number or `@const`, only on `marker.size`, `marker.standoff`, `marker.line.width`, `textfont.size` (arrows sized by wind speed, dots by rainfall) |
+| `.min()`, `.max()`, `.quantile(0.98)` | One number for a scale only: `zmin`, `zmax`, `zmid`, `cmin`, `cmax`, `cmid`, an axis `range`, `tickvals` |
+| `@REGION.x`, `@REGION.y` (or `.lon`, `.lat`) | A GeoJSON input's lines and rings, gaps between parts |
+| `@REGION.path`, `@NE.ocean_50m.clip(n, w, s, e).path` | Its polygons as an SVG path, for a filled `type: 'path'` shape (holes stay empty) |
+| `@NE.coastline_50m.clip(n, w, s, e).x` | Built-in Natural Earth lines: `coastline`, `borders`, `disputed`, `lakes`, `rivers` at `10m` / `50m` / `110m` |
+| `@GB.admin1.clip(n, w, s, e).x` | Built-in geoBoundaries admin lines inside each country the box touches, `admin1` or `admin2` (downloaded per country; country outlines are left to `borders` and `coastline`) |
 
-`isel` counts from 0 (`-1` is the last); `sel` picks by label. `bbox` is `[N, W, S, E]`. `--help` lists every option; `--dump-spec -` shows the spec for your files.
+Shapes: `z` is 2-D (a lat/lon grid is drawn with rows as latitudes, and needs `x: '@NAME.lon', y: '@NAME.lat'` beside it); `customdata` 1-D or 2-D; everything else one value or 1-D. A trace's `x` and `y` (not a gridded one's) must pair up: the same length, and from two files the same time (or other) values; otherwise it's an error suggesting `merge`. Traces on one `coloraxis` holding different units print a warning. A dim of length 1 (the one time of a period total) is dropped when there are too many; any other leftover dim is an error naming it: pick a value with `isel` / `sel`, or draw one trace per value with a Jsonnet loop (`for m in std.range(0, inputs.ENS.dims.number - 1)`).
 
-### Output
-The figure at `-o`. PNG/JPG also print `data: NULL` when every value drawn is NaN.
+References select and label stored values; they never compute. The one exception, a marker size in pixels (the arithmetic row above), changes how big a marker is on screen, not what is drawn. Arithmetic, averages and smoothing come from data skills first, and the error says which: `summarize-dim` (mean, quantiles over members), `aggregate-temporal` (rolling, resampling), `unit-convert`, `difference`, `coarsen` / `downscale`, `clip-region` (masks), `step-to-time` (valid dates), `wind-speed-direction` (speed and direction from u / v). A mean ± SD band is Plotly stacking: mean − SD from `difference`, then the SD stacked on it twice (`--recipe sd_band`).
 
-### Notes
-- A file with more than one data variable needs `meta.source.variable` set to the one to draw. Plot stops rather than guess; inspect-zarr lists the variables.
-- A map shows one value per cell: pick one value of any extra dim (`number`, `vertical`) with `isel` / `sel`, panel it with `"meta": {"facet": "number"}`, or average it first with summarize-dim.
-- Plot draws the values in the file, in its units (K stays K, Pa stays Pa; run unit-convert for °C or hPa), so `zmin`, contour levels and palette edges are in those units. A precip rate stays a rate (mm/day); for period totals (mm) run aggregate-temporal, then convert-to-totals.
+### `ws.libsonnet`
+`local ws = import 'ws.libsonnet';` gives plain Plotly JSON; change any part with `+`. Imports are found by name in the skill's library (`ws.libsonnet`, `palettes.libsonnet`), its recipes, beside the spec file, and in the working folder, so a palettes file written there (`local mine = import 'my_palettes.libsonnet';`) needs no flag.
 
-### Example
-```bash
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py -i chirps_week.zarr=CHIRPS -i ecmwf_week.zarr=ECMWF -o obs_vs_fc.png --spec '{
-  "data": [{"uid": "ECMWF", "meta": {"source": {"isel": {"step": 0}}}}],
-  "layout": {"title": {"text": "Week 1 rainfall"}, "meta": {"geo": {"bbox": [5.5, 33.5, -5, 42.5]}}}}'
-```
-CHIRPS and ECMWF week-1 rainfall side by side over Kenya, each on its own grid, with one shared colorbar.
+- `ws.map(box, width=760, pad=0.03, sea='#c9d1d8')` — one map's axes (equal degrees, range from `box` widened by `pad`), a canvas sized to it, the legend in a row under the map, and the sea filled under the data, so it shows wherever a field has no data (the sea under a land-only field); land stays white. `sea` sets its color (`sea='#708090'` matches the lakes), `sea=null` leaves it out. It is a layout shape named `basemap-sea-0`, kept alongside your own shapes in either order.
+- `ws.pad(bbox, frac=0.03)` — `bbox` widened on every side by `frac` of its larger span. `inputs.NAME.bbox` runs between the outermost cell centres, so `ws.map`, `ws.grid` and `ws.basemap` pad it by 3% so edge cells and outlines aren't cut; `pad=0` keeps the box exact.
+- `ws.grid(box, rows, cols, panel=340, gap=0.04, pad=0.03, empty=[], sea='#c9d1d8')` — axes for maps in a grid, filled row by row. `empty` lists panels with no map: they are hidden, and tick labels go on the lowest filled panel of each column and the leftmost of each row. Panels showing different regions: set `xaxisN+: {range: […], showticklabels: true}` (and `yaxisN+:`) from `ws.pad(their bbox)`. `ws.rowTitle(i, text)` labels the row that starts at panel `i`. `ws.axes(i)` gives panel `i`'s `xaxis` / `yaxis` (`x`, `x2`, …) to add to a trace; `ws.panelTitle(i, text)` an annotation above it (add titles with `annotations+:` after `ws.classBar`). `ws.axes` and `ws.panelTitle` work for chart panels too; lay those out with Plotly's own `layout.grid: {rows, columns, pattern: 'independent'}`.
+- `ws.basemap(box, i=0, coastline=true, borders=true, disputed=true, lakes=true, rivers=true, admin='auto', style={}, pad=0.03, view=null)` — base-map lines on panel `i`, clipped to the same padded box as `ws.map` / `ws.grid`. `admin` takes a level, not `true`: `1` states / provinces / counties, `2` the units below them, `false` none, or `'auto'` (the default: `1` on maps up to 20° across, else none). Its lines come from geoBoundaries, the same units as `resolve-region`, `clip-region` and `label-group`. The other layers are on unless switched off with `false`: `rivers`, `lakes` (always drawn opaque over the data unless `lakes=false`), `borders` (agreed international boundaries), `disputed` (every other land line, dashed) and `coastline`. Layers are drawn bottom first: `admin`, `rivers`, `lakes`, `borders`, `disputed`, `coastline`. Admin lines are only those between a country's units; its outline is the `borders` and `coastline` layers'. Each country in the box is one download, and offline the admin lines are skipped with a warning. "No disputed borders" is `ws.basemap(bbox, disputed=false)`; fewer lines on small panels, `rivers=false, admin=false`. `style={admin: {line: {color: 'white'}}}` restyles a layer by the same names. The sea is filled by `ws.map` / `ws.grid` (below); land is not. A GeoJSON input draws boundaries of your own. `view='KEN'` (any ISO3 code) draws that country's border its own way: the outline `resolve-region` writes (geoBoundaries), with Natural Earth's `borders` and `disputed` lines on or inside it left out, so Kenya includes the Ilemi Triangle; other countries keep Natural Earth's lines. Country borders come from `borders`; outline only regions it doesn't draw (one county picked out, your own polygon). A country's outline from `resolve-region` doesn't line up with Natural Earth's 10 m borders, so drawing it as well doubles the border.
+- `ws.classBar(p, title='', coloraxis='coloraxis', x=1.03, y=0.05, len=0.85, width=0.03, format='%g')` — for a class palette: the `coloraxis` with color steps at the class bounds, and a colorbar with one equal-height band per class, labelled at the bounds (or by the palette's `labels`, which can name the triangles too), under / over as triangles. It is drawn as layout shapes and annotations, so write your own as `annotations+: [...]` after it. `y` (the bottom of the bands) and `len` place it, as fractions of the plotting area, when a figure has two: e.g. `y=0.55, len=0.4` and `y=0.05, len=0.4`; leave room for the under / over triangles and the title between them. Keep `title` short (`mm`, `m/s`): it sits above the bar. A second `ws.classBar` for the same `coloraxis` replaces the first, so `layout+: ws.classBar(other palette)` swaps a recipe's palette; bars for other axes and your own shapes and annotations stay.
+- `ws.stepped(p)` — the coloraxis object itself, with Plotly's own colorbar: `coloraxis: ws.stepped(p)` (or `coloraxis2:`). Use it for continuous palettes (no `bounds`), with `cmin` / `cmax` / `cmid` added by `+`.
+- `ws.palettes.NAME` — `{colors, bounds}`: rainfall totals `ppt_day` (0–50 mm), `ppt_week` (0–200, also a dekad), `ppt_month` (0–400), `ppt_season` (0–1000), `ppt_total` (0–2500); anomalies `ppt_anom_day` … `ppt_anom_season` (±50 / ±200 / ±300 / ±500); `ppt_poa` (% of normal), `spi`, the masters they are cut from `ppt_master`, `ppt_anom_master`; `ppt_spp`; verify maps `hits` (classes with labels); continuous (no bounds, for `ws.stepped`): `bias`, `precip_bias`, `mae`, `wind_rose`, `colorblind`, `rocket`; Tropical Tidbits model charts `tt_precip_rate` (mm/h), `tt_precip_total`, `tt_pwat` (mm), `tt_wind` (m/s), `tt_z500` (dam). Your own: `{colors: [...], bounds: [...]}`, one color per class, or under + classes + over; `labels: [...]` names the classes: one per class, or with under / over colors one per color, the first and last labelling the triangles (`['<1', '1–10', …, '>100']`).
+- `ws.date(t, year=true)` — `'2026-10-26'` → `26 Oct 2026`; a time not at midnight adds `12 UTC`.
+- `ws.dayOfYearTicks` — `xaxis` ticks at the 1st of each month for a `.dt.dayofyear` axis (counted in a non-leap year; after 28 Feb a leap year sits a day later).
+- `ws.player(names, duration=500)` — play / pause buttons and a slider for frames named `names`; a `.gif` plays at the same `duration` (ms).
+- `ws.template` — the house colorway (no grey, kept for ensemble members) on a white plot area. A spec that sets no `layout.template` gets it; extend it with `template: ws.template + {layout+: {...}}`, set a Plotly template by name (`template: 'plotly_white'`), or `template: {}` for Plotly's bare defaults.
 
-## Details
+## Notes
+- Shapes and annotations at a fixed position on a data axis take the position as typed (an annotation on a log axis takes its log10; see below): a line at Lake Turkana (`xref: 'x', x0: 36, x1: 36, yref: 'paper', y0: 0, y1: 1`), a threshold band (`y0: 0.5, y1: 1`), an annotation at a date. For a position that changes each run (an init date in a scheduled job), pass it with `--const init=2026-10-31` and write `x0: '@const.init'`. A scatter trace with no `@` references at all is a mark placed by hand and may type in up to 5 values per data key: a cross-section line (`x: [33, 42], y: [3.5, 3.5]`), a town pin, a reference arrow, the flat edge a fill reaches down to. Any other trace type (heatmap, contour, bar, pie, …) shows values, so it always binds them: a table of scores is one Zarr bound with `@`, never cells typed into the spec. A trace that draws data binds all of its data; a constant there is `--const`, as `x: ['@const.kx']`. Marks can't go in frames. A key, legend box or label that need not sit at a lon / lat goes in `xref: 'paper'` / `yref: 'paper'` units. Labelled bars keep their data axis: `x: '@A.time'` with `xaxis: {tickvals: '@A.time', ticktext: [...]}`, not `x: ['28 Sep–4 Oct', …]`.
+- A season across New Year (Oct–Feb) on one axis: `x: '@Y.time.dt.strftime("%d %b")'` with `xaxis: {type: 'category', categoryorder: 'array', categoryarray: '@LEAP.time.dt.strftime("%d %b")'}`, the order taken from one input that covers the season in a leap year.
+- A second y axis (`overlaying: 'y'`) syncs its ticks to the first by default; set `tickmode: 'auto'` on it for round numbers.
+- The base map downloads Natural Earth shapefiles on first use (cartopy, network needed); later runs reuse them.
+- Titles don't wrap: break a long one with `<br>`, or put the detail in `title.subtitle`.
+- A log axis (pressure) labels Plotly's minor ticks too; set `tickvals` to the levels (`tickvals: '@RH.vertical'`).
+- On a log axis, an annotation's `x` / `y` and the axis `range` are the log10 of the value: a label at 850 hPa is `y: 2.93` (`std.log(850) / std.log(10)`), and 1000 to 200 hPa is `range: [3, 2.30103]`. Shapes and traces take the value itself (`y0: 1000`). An annotation at `y: 850` sits at 10^850, and autorange stretches the axis to reach it, squeezing the data into a sliver. A label that need not sit at a level goes in `yref: 'paper'`.
+- Values are drawn in the file's own units (K stays K, Pa stays Pa): run unit-convert for °C or hPa, and set palette bounds and contour levels in those units.
+- A forecast's `step` is a lead time. Run step-to-time to draw it by valid date beside observations, or use `.dt.days` for lead days.
+- Animations: `frames[k].data` replaces the traces listed in `frames[k].traces` (by position in `data`). Keep the base map out of the frames: it stays on every frame. A scatter trace in the frames must be `scattergl`: an SVG `scatter` there blanks the heatmap on every other paint, so the map flashes. `wind_markers` arrows don't animate well: `scattergl` has no `marker.standoff`, so their heads would sit mid-shaft.
+- A still image takes at most 100 panels; play more as frames.
+- Errors come from Jsonnet (syntax, unknown field), from the reference checks (which data, which dim, which skill), or from Plotly itself, naming the trace and its type (`data[3].line: a heatmap has no property 'line'`), with what to do for the usual mix-ups.
 
-### Panels and layers
-- A file with several times or steps gets one panel each, titled with its date. `layout.grid.rows` / `columns` set the grid; `xgap` / `ygap` the spacing, as a fraction of a panel.
-- Panels showing the same quantity share one colorbar. To split one off: `{"data": [{"uid": "FC", "coloraxis": "coloraxis2"}]}`.
-- Panel titles are annotations named `panel-title-1`, `panel-title-2`, …; set one's text with `{"layout": {"annotations": [{"name": "panel-title-2", "text": "GEFS · hit 78% · BER 15%"}]}}`. The text takes any characters, and `<br>` for a second line. Side-by-side files default to their `-i` NAME (else the file name) as the title, but NAME is an id of letters, digits and `_`: put title text in the annotation, not in NAME.
-- Maps use plain x/y axes in degrees (x = longitude). Add points or lines as `scatter` traces with `x` / `y`, and boxes as `layout.shapes` with `xref: "x"`, `yref: "y"`.
-- An `outline` layer frames the map unless `geo.bbox` is set, and hides the built-in admin-1 lines. Use it to draw official boundaries.
-- The canvas fits the maps (up to 760×560 px for one map, 340×340 px per panel in a grid). `layout.width` / `height` fix it.
-
-### Lines over time
-- A series runs along `time`, or for a forecast along its valid date (init time + `step`). Every other dim must go: pick one value with `isel` / `sel`, draw one line per value with `"along": "number"` (or `"station_id"`: a station file is a map until you pick or `along` its stations), or average it first with summarize-dim (for an area mean, `--dim latitude --dim longitude --method mean --lat-weighted`).
-- Each 1-D file is one line on one shared axis (up to 26 files). The legend names it after its file, or its station id; `"name"` renames it. With two or more lines the legend sits in rows above the plot; one line has none.
-- Each line uses only its own settings, as in Plotly: set `along`, `band`, `align` or `source.variable` on every line that needs it.
-- `"along": "number"` draws one line per member under one legend entry; `"along_color": "cycle"` gives each its own color and entry. `"band": [10, 90]` shades that percentile range (`[0, 100]` is min–max) and draws the mean bold; `"members": false` hides the members. A band trace draws three parts, each styled as its own trace: its uid is the mean line (`name`, `line`), `UID-members` the member lines and `UID-band` the shading (`name`, `fillcolor`): `{"data": [{"uid": "FC", "name": "Mean", "line": {"color": "red", "width": 4}, "meta": {"along": "number", "band": [0, 100]}}, {"uid": "FC-members", "line": {"color": "grey"}, "opacity": 0.3}, {"uid": "FC-band", "name": "Range"}]}`. With `"type": "bar"`, `along` gives one bar series per value.
-- Two variables of one file are two `-i` of the same path, each with its own `"meta": {"source": {"variable": …}}`.
-- One panel per line, as in Plotly: put each line on its own axes and lay them out with a grid: `{"data": [{"uid": "1", "xaxis": "x2", "yaxis": "y2"}], "layout": {"grid": {"rows": 2, "columns": 1, "pattern": "coupled"}}}`. A right-hand axis: `{"data": [{"uid": "1", "yaxis": "y2"}], "layout": {"yaxis2": {"overlaying": "y", "side": "right"}}}`.
-- Lines on one axis with different units, or with no dates in common, print a warning and still draw.
-- `"align": "dayofyear"` on each line puts every year on one calendar, labelled `1 Oct`, `15 Nov`, … (29 Feb joins 28 Feb). Pass one file per year, each a single season; a season across New Year (DJF) puts Jan–Feb at the left.
-- The y-axis label is the variable's `long_name` and units. A rainfall axis does not go below zero.
-
-### Colors
-- Precip totals use the mm class palette `default_precip`; anomalies use `default_precip_anom`. The range follows `aggregation_period`: under 2 days 0–50 mm, up to 10 days (a dekad) 0–200, under 40 days 0–400, longer 0–1000 (anomalies ±50 / ±200 / ±300 / ±500).
-- Set a palette with `"meta": {"palette": NAME}`: `default_precip`, `default_precip_anom`, `ppt_daily` … `ppt_season`, `ppt_anom_*`, `spi`, a shipped theme's palette (below), or your own `{colors, bounds}`.
-- Shipped themes add palettes, loaded by name with `--theme-file NAME` (`--help` THEMES lists each one's palettes):
-  - `tropical_tidbits`: Tropical Tidbits model-chart colors. `tt_wind` (wind speed, m/s), `tt_precip_total` (mm), `tt_precip_rate` (mm/h), `tt_pwat` (mm), `tt_z500` (dam). With this theme, wind speed gets `tt_wind` and precip gets `tt_precip_total` without naming a palette.
-- Temperatures use `RdYlBu_r`; fields spanning zero use `RdBu_r`; flag fields (verify hits) get one color per flag.
-- `{"layout": {"coloraxis": {"colorbar": {"orientation": "h"}}}}` puts the colorbar under the maps.
-- The standard look is one theme file, `scripts/weather_skills_plotting/themes/default.json` in this skill; `themes/README.md` beside it explains each key. A `--theme-file` is JSON/TOML with any of its five keys, layered on top of it — copy `default.json` to start one:
-  - `template`: a Plotly template (fonts, colorway, backgrounds).
-  - `palettes`: `{name: {colors, bounds}}` for `meta.palette`; a name like a built-in one replaces it.
-  - `defaults`: what a field gets when the spec names no palette, per kind: `precip`, `precip_anomaly`, `precip_poa`, `spi`, `wind_speed`, `diverging`, `sea_level_pressure`, `temperature`, `sequential`. A value is a palette (name, color list or `{colors, bounds}`) or a Plotly colorscale name.
-  - `styles`: Plotly settings per drawn element, e.g. `isobars`, `highs` / `lows` (H / L text), `arrows`; anything the spec sets on a trace wins.
-  - `overlays`: line styles per base-map layer, e.g. `{"borders": {"line": {"color": "#333333"}}}`.
-- Without `--theme-file`, `$WEATHER_SKILLS_PLOT_THEME` or `~/.config/weather-skills/plot.json|toml` is used if present.
-
-### Verification grid
-`--obs OBS --forecast W1 --verify V1 --forecast W2 --verify V2 …` draws, for one verifying week, the observation and one column per forecast lead on one color scale, with each lead's verify map (hits, bias, or MAE from the verify skill) underneath and the metric named under the observation. One `--forecast` gives one row: observation, forecast, verify map.
-- Prepare: `--obs` and each `--forecast` hold one time, the verifying week (select it first; a forecast with a `step` axis needs step-to-time before that). Obs and forecasts share one grid: coarsen the obs onto the forecast with `--reference-grid`. An ensemble forecast is drawn as its mean: run summarize-dim `--dim number --method mean` first. For rainfall, run aggregate-temporal, then convert-to-totals, before verify. All `--verify` files use one metric.
-- Traces: `"obs"`, `"forecast1"` … `"forecastN"`, `"verify1"` … `"verifyN"`; column titles `panel-title-1` (obs), `panel-title-2` (week 1), …; the metric label `row-label-metric`. Obs and forecasts share `coloraxis`, verify maps `coloraxis2` (`{"layout": {"coloraxis2": {"cmin": -20, "cmax": 20}}}`). Name the variable on each input that holds several: `{"data": [{"uid": "forecast1", "meta": {"source": {"variable": "tp"}}}]}`.
-- Colors: hits are disagree / below / hit, with the event threshold in the colorbar title; bias is centred on zero to the 98th percentile of |bias| (rainfall brown = too dry, green = too wet); MAE runs white to warm. Each lead's score summary goes to stderr.
-- The default title is the week's dates (`5–11 Oct '26`), from any input that still has a `time` coordinate. A `layout.title` replaces it as given, so include the week in your own title.
-
-### Mediogram
-`--mediogram -i FORECAST -i MCLIMATE` draws, at `layout.meta.geo.point` (required), a blue box of the forecast ensemble next to a red box of the model climate for each lead, with a black line through the forecast mean. Each file uses its grid cell nearest the point; up to 15 leads both files have.
-- Inputs: both need ensemble members (`number`), leads (`step`) and latitude/longitude. The m-climate is the same system's reforecasts of past years for the same leads (individual members; a mean/std climatology is not one). No fetcher here supplies reforecasts; a past init of the same system is a rough stand-in, so say so in the title. For rainfall totals, run aggregate-temporal then convert-to-totals on both first.
-- Traces: `"forecast"`, `"mclimate"` (box) and `"forecast-mean"` (line). Pick leads with the same `meta.source.isel` `{"step": [0, 2, 4]}` on all three; set `meta.source.variable` on each trace whose file holds more than one variable. The default title names the quantity, grid cell and init date; a `layout.title` replaces it as given.
-- Boxes span the 25th–75th percentile with the median; whiskers reach 1.5 × the box height. With the forecast's init `time` the x-axis shows valid dates ("Week starting" for weekly totals).
-
-### Animation
-Add `--animate` to any map command (`-i GRID`, or a `--layer` stack of heatmap, contour, stations, wind arrows, outlines and masks) and write `-o out.html`: a self-contained interactive map (plotly.js embedded, works offline) with one frame per time or step, play / pause and a slider, every frame on one color scale and titled with its time. Each frame is the map `plot` draws for that time, so the spec, theme and layers work as on a still map.
-- The base map (coastlines, borders with disputed lines dashed, lakes, rivers; admin-1 lines on small boxes) is the still map's and stays on every frame. Add boundaries with `--layer outline:region.geojson` (resolve-region writes one) and clip with `--layer mask:region.geojson`, as on a still map.
-- Every dim other than the map's own and the animated one must go (`isel` / `sel`, or summarize-dim); `{"data": [{"uid": "0", "meta": {"facet": "number"}}]}` animates another dim. Layers must cover the same times. It plays one map: stack inputs with `--layer`, not several `-i`. Time series and other non-map plots don't animate.
-- Speed: `{"layout": {"meta": {"animation": {"duration": 300}}}}` (ms per frame, default 500; `transition` ms between frames). Your own `layout.updatemenus` / `sliders` replace the default controls.
-- GIF: `-o out.gif` writes the frames as a looping GIF at the same `duration`, with no play / pause or slider. Each frame is drawn like a PNG (`layout.meta.export.scale` sets pixel density); GIFs hold 256 colors per frame, so smooth color scales band slightly. Repeat `-o` for both (`-o rain.html -o rain.gif`).
-- Size grows with frames × cells; stderr gives the frame count and data size and warns above 50 MB. Pick fewer frames (`{"step": {"start": 0, "stop": 12}}`) or a smaller `bbox`.
-
-### Provenance
-The file's history (`weather_skills_history`) is embedded in the PNG / GIF metadata or HTML `<meta>` tag; read it with the `provenance` skill. A PNG/JPG/GIF with a complete history carries a small red seal in the bottom-right corner.
-
-### More examples
-```bash
-# Stations over IMERG, inside a county outline
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py -o nairobi.png \
-  --layer heatmap:imerg.zarr --layer scatter:tahmo.zarr=STATIONS --layer outline:nairobi.geojson \
-  --spec '{"data": [{"uid": "STATIONS", "marker": {"size": 14}}]}'
-# MSLP chart: anomaly shading, labeled black isobars every 4 hPa, and H / L with the
-# central pressure (highs / lows from local-extrema; --radius 7 marks a Tropical Tidbits-style
-# set of centres, 15 or more misses most of them). For a forecast, pick the same step
-# on every layer with "meta": {"source": {"isel": {"step": N}}}. Pressure is drawn in the
-# file's units: run unit-convert on msl (ERA5 stores Pa) for labels in hPa.
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py -o mslp.png \
-  --layer heatmap:msl_anom.zarr --layer contour:msl.zarr=MSLP \
-  --layer scatter:highs.zarr --layer scatter:lows.zarr
-# Tropical Tidbits look: --theme-file tropical_tidbits adds TT's palettes (tt_precip_rate in
-# mm/h, tt_precip_total, tt_pwat, tt_wind, tt_z500 in dam). --help RECIPES has MSLP & precip,
-# MSLP & 10 m wind, total precip, MSLP & PWAT, and 500 mb height & MSLP. Palettes and levels
-# are in those units, so unit-convert the inputs to them first (msl to hPa).
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py -o tt_pwat.png --theme-file tropical_tidbits \
-  --layer heatmap:pwat.zarr=PWAT --layer contour:msl.zarr=MSLP --spec '{"data": [
-  {"uid": "PWAT", "meta": {"palette": "tt_pwat"}},
-  {"uid": "MSLP", "contours": {"coloring": "none", "showlabels": true, "start": 900, "end": 1080, "size": 2}}]}'
-# Ensemble members as lines with a 10–90% band
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py -i ens_area_mean.zarr -o ens.png \
-  --spec '{"data": [{"uid": "0", "meta": {"along": "number", "band": [10, 90]}}]}'
-# Daily CHIRPS as bars, climatology as a dashed line
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py -i obs_area.zarr=OBS -i clim_area.zarr=CLIM -o obs_vs_clim.png \
-  --spec '{"data": [{"uid": "OBS", "name": "CHIRPS", "type": "bar"}, {"uid": "CLIM", "name": "Climatology", "line": {"dash": "dash"}}]}'
-# Three OND seasons on one calendar
-uv run ${CLAUDE_SKILL_DIR}/scripts/plot.py -i chirps_ond_2023.zarr -i chirps_ond_2024.zarr -i chirps_ond_2025.zarr -o ond.png \
-  --spec '{"data": [{"uid": "0", "meta": {"align": "dayofyear"}}, {"uid": "1", "meta": {"align": "dayofyear"}}, {"uid": "2", "meta": {"align": "dayofyear"}}]}'
-```
+## Output
+The figure at each `-o`. Every output prints `plot hash:` (of the pixels for PNG / JPG / GIF, of the figure JSON for PDF / SVG / HTML) and `data: not null | NULL` over the plotted traces, frames included; a trace that is all NaN gets its own line. A GIF also prints its frame count and size, with a warning above 8 MB, which many chat clients and slide tools won't show inline; an animated HTML prints its frame count and figure size, with a warning above 50 MB. The provenance (`weather_skills_history`, with the evaluated spec) is embedded in the file; read it with the provenance skill. A PNG, JPG, GIF, SVG or PDF whose history is complete carries a small red seal in its bottom-right corner.

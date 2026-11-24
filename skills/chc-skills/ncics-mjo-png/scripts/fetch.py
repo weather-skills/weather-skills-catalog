@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core>=0.1.1",
+#   "weather-skills-core>=0.4.0",
 # ]
 # ///
 """Download an NCICS MJO or equatorial-wave map or Hovmöller diagram as a PNG."""
@@ -19,7 +19,7 @@ from pathlib import Path
 from weather_skills_core import DataError, UsageError, weather_skill
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.2"
+_SKILL_VERSION = "0.0.3"
 
 # Live figures are overwritten in place under /pub/mjo/v2/{map,hov}/.
 # Dated snapshots live under /pub/mjo/archive/YYYY/YYYY-MM-DD/v2/{map,hov}/

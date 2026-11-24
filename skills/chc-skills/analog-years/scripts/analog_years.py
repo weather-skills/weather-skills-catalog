@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core>=0.1.1",
+#   "weather-skills-core>=0.4.0",
 # ]
 # ///
 """Print the historical analog years for a date."""
@@ -12,7 +12,7 @@ import sys
 from weather_skills_core import UsageError, weather_skill
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.3"
+_SKILL_VERSION = "0.0.4"
 
 # Calendar year → analog years. Stub: only 2026 is populated.
 _ANALOGS = {

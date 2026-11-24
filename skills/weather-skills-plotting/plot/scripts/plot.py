@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core>=0.2.0",
+#   "weather-skills-core>=0.3.2",
 #   "cf-xarray>=0.11",
 #   "cftime>=1.6",
 #   "numpy>=2.5",
@@ -12,315 +12,247 @@
 #   "shapely>=2.1.2",
 #   "plotly>=7.1",
 #   "kaleido>=1.5",
+#   "gojsonnet>=0.22",
+#   "pillow>=11",
 # ]
 # ///
 # The weather_skills_plotting library sits next to this script (scripts/weather_skills_plotting),
 # so the skill folder is self-contained: Python finds it on the script's own path.
-"""Draw weather-skills Zarrs as maps, time series, scatter plots, wind roses, verification grids, mediograms, or animations."""
+"""Draw weather-skills Zarrs with a Jsonnet spec that evaluates to a Plotly figure."""
 
 import argparse
+import json
+import re
+import sys
 from pathlib import Path
 
-from weather_skills_core import Dataset, UsageError, weather_skill
-from weather_skills_core.cf import cf_dim
+from weather_skills_core import UsageError, weather_skill
+from weather_skills_core.units import dequantify_dataset
 
-from weather_skills_plotting import parse_spec_arg
-from weather_skills_plotting.cli import (
-    input_ids,
-    parse_input,
-    run,
-    skeleton,
-    spec_datasets,
-    split_name,
+from weather_skills_plotting.bind import GeoLines, resolve
+from weather_skills_plotting.export import OUTPUT_SUFFIXES, export, key_hint, validate
+from weather_skills_plotting.geo import load_geojson
+from weather_skills_plotting.lint import MARK_POINTS, UnboundDataError, check_bindings
+from weather_skills_plotting.render import (
+    SpecArg,
+    evaluate,
+    house_template,
+    input_metadata,
+    recipe_text,
 )
-from weather_skills_plotting.geodata import point_dim
-from weather_skills_plotting.mediogram import build_mediogram_spec
-from weather_skills_plotting.reference import install_spec_help
-from weather_skills_plotting.series import (
-    MAX_INPUTS,
-    trace_label,
-    warn_disjoint_dates,
-    warn_mixed_units,
-)
-from weather_skills_plotting.spec import DUMP_SPEC_HELP, SPEC_ARGUMENT_HELP, merge_spec
-from weather_skills_plotting.verify import build_verify_spec
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "1.0.3"
+_SKILL_VERSION = "2.0.5"
 
-LAYER_KINDS = ("heatmap", "contour", "scatter", "quiver", "outline", "mask")
-_ZARR_LAYERS = frozenset({"heatmap", "contour", "scatter", "quiver"})
+# A still image with more panels than this is refused: Chrome takes ~7 s to render
+# 200 small maps and never finishes 1,826. Frames have no limit.
+MAX_PANELS = 100
+LARGE_HTML_MB = 50
+
+_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
-class LayerArg:
-    """``--layer KIND:PATH[=NAME]``. The decorator opens Zarr layers (``.ds``)."""
+class InputArg:
+    """``-i PATH=NAME``. The decorator opens a Zarr (``.ds``); a GeoJSON is read here."""
 
-    def __init__(self, kind: str, path: str, name: str | None):
-        self.kind, self.path, self.name, self.ds = kind, path, name, None
+    def __init__(self, path: str, name: str):
+        self.path, self.name, self.ds = path, name, None
+
+    def is_geojson(self) -> bool:
+        return Path(self.path).suffix.lower() in (".geojson", ".json")
 
     def zarr_paths(self):
-        return [Path(self.path)] if self.kind in _ZARR_LAYERS else []
+        return [] if self.is_geojson() else [Path(self.path)]
 
     def __str__(self):
-        # Provenance records str(); keep the flag's own form.
-        return f"{self.kind}:{self.path}" + (f"={self.name}" if self.name else "")
+        return f"{self.path}={self.name}"
 
 
-def parse_layer(value):
-    kind, sep, path = str(value).partition(":")
-    kind = kind.strip().lower()
-    if not sep or not path.strip() or kind not in LAYER_KINDS:
+def parse_input(value):
+    path, sep, name = str(value).rpartition("=")
+    if not sep or not path or not _NAME.fullmatch(name):
         raise argparse.ArgumentTypeError(
-            f"--layer expects KIND:PATH[=NAME] with KIND one of {', '.join(LAYER_KINDS)}; "
-            f"got {value!r}"
+            f"-i expects PATH=NAME, NAME a letter or _ then letters, digits and _ (OBS, "
+            f"fc_week1); got {value!r}. NAME is how the spec refers to the file ('@NAME.var'); "
+            'readable legend text goes in the trace\'s "name"'
         )
-    return LayerArg(kind, *split_name(path.strip(), "--layer"))
+    if name in ("NE", "GB", "const"):
+        raise argparse.ArgumentTypeError(
+            f"-i NAME {name!r} is built in ('NE' is Natural Earth, 'GB' the geoBoundaries "
+            "admin lines, 'const' the --const values)"
+        )
+    return InputArg(path, name)
 
 
-def _default_trace(uid: str, ds, user=None, *, xaxis=None) -> dict:
-    """Heatmap for a lat/lon grid, station markers for points, else a line. A ``user`` trace
-    naming ``meta.x`` / ``meta.y`` is an xy plot, so its stations are not a map."""
-    source = {"input": uid}
-    xy = bool({"x", "y"} & set((user or {}).get("meta") or {}))
-    lat, lon = cf_dim(ds, "latitude"), cf_dim(ds, "longitude")
-    pdim = point_dim(ds)
-    tdim = next((d for d in ("time", "step") if d in ds.dims and ds.sizes[d] > 1), None)
-    if pdim is not None and ds.sizes[pdim] == 1 and tdim:
-        # One station over time is a time series, not one dot on a map.
-        trace = {"type": "scatter", "meta": {"source": {**source, "isel": {pdim: 0}}}}
-    elif pdim is not None and not xy:
-        trace = {"type": "scatter", "meta": {"bind": "points", "source": source}}
-    elif lat in ds.dims and lon in ds.dims:
-        trace = {"type": "heatmap", "meta": {"source": source}}
-    else:
-        trace = {"type": "scatter", "meta": {"source": source}}
-    trace["uid"] = uid
-    if xaxis:
-        trace.update(xaxis=xaxis, yaxis="y" + xaxis[1:])
-    return trace
-
-
-def _as_drawn(ds, trace):
-    """The input as the spec's own variable / isel / sel / along leave it: the default fits
-    what is drawn (one line per station with ``along``, not a station map)."""
-    meta = (trace or {}).get("meta") or {}
-    source = meta.get("source") or {}
-    if source.get("variable") in ds.data_vars:
-        ds = ds[[source["variable"]]]
-    picks = {**(source.get("isel") or {}), **(source.get("sel") or {})}
-    if meta.get("along"):
-        picks[meta["along"]] = 0
-    for dim, pick in picks.items():
-        # One value drops the dim; which value does not matter for the shape.
-        if dim in ds.dims and not isinstance(pick, (list, dict)):
-            ds = ds.isel({dim: 0})
-    return ds
-
-
-def _layer_traces(layers):
-    data, datasets, mask = [], {}, None
-    for uid, layer in zip(input_ids([x.name for x in layers]), layers, strict=True):
-        if layer.kind == "mask":
-            mask = layer.path
-            continue
-        if layer.kind == "outline":
-            data.append(
-                {
-                    "uid": uid,
-                    "type": "scatter",
-                    "meta": {"bind": "geojson", "source": {"geojson": layer.path}},
-                }
-            )
-            continue
-        datasets[uid] = layer.ds
-        source = {"input": uid}
-        if layer.kind in ("heatmap", "contour"):
-            data.append({"uid": uid, "type": layer.kind, "meta": {"source": source}})
-        elif layer.kind == "scatter":
-            data.append(
-                {"uid": uid, "type": "scatter", "meta": {"bind": "points", "source": source}}
-            )
-        else:
-            data.append(
-                {"uid": uid, "type": "heatmap", "meta": {"bind": "speed", "source": source}}
-            )
-            data.append(
-                {
-                    "uid": f"{uid}-arrows",
-                    "type": "scatter",
-                    "meta": {"bind": "arrows", "source": source},
-                }
-            )
-    return data, datasets, mask
+def parse_const(value):
+    """``--const NAME=VALUE``, kept as the text given so provenance replays it as passed."""
+    key, sep, _ = str(value).partition("=")
+    if not sep or not _NAME.fullmatch(key):
+        raise argparse.ArgumentTypeError(f"--const expects NAME=VALUE; got {value!r}")
+    return str(value)
 
 
 @weather_skill(name="plot", version=_SKILL_VERSION)
 @weather_skill.argument(
     "-i",
     "--input",
-    dest="inputs",
+    dest="input",
     type=parse_input,
     action="append",
-    help="Input Zarr as PATH or PATH=NAME. Repeat for side-by-side maps, one panel per file on "
-    "its own grid. In --spec the input is uid NAME, else its position: 0, 1, …. Exclusive with "
-    "data layers.",
+    help="An input as PATH=NAME: a Zarr, or a GeoJSON (.geojson / .json) of outlines. Repeat. "
+    "The spec refers to it as '@NAME…'; its metadata is std.extVar('inputs').NAME.",
 )
 @weather_skill.argument(
-    "--layer",
+    "--spec",
+    type=SpecArg,
+    help="Jsonnet (a .jsonnet / .json file, a recipe name such as map, or the text itself) that "
+    "evaluates to a Plotly "
+    "figure {data, layout, frames}. A string starting with @ names data: '@OBS.precip', "
+    "'@OBS.precip.isel(time=0)', '@OBS.precip.max()' (scales only). import 'ws.libsonnet' "
+    "for map axes, grids, base maps, palettes and an animation player.",
+)
+@weather_skill.argument(
+    "--const",
+    type=parse_const,
     action="append",
-    type=parse_layer,
-    help="KIND:PATH or KIND:PATH=NAME layer drawn on one shared map; repeat to stack, bottom "
-    "first. Kinds: heatmap, contour, scatter (stations), quiver (u/v), outline (GeoJSON), mask "
-    "(GeoJSON). In --spec the layer is uid NAME, else its position: 0, 1, ….",
+    help="NAME=VALUE, a constant: '@const.NAME' in a trace's data or a shape / annotation "
+    "position (a threshold line at --const nino=0.5, a date), std.extVar('const').NAME in text "
+    "such as a title. Numbers and text; repeat. A trace's data is an input or one of these, "
+    "never typed into the spec.",
 )
 @weather_skill.argument(
-    "--obs",
-    type=Dataset("spatial"),
-    help="Verification grid: observation Zarr for the verifying week (input id obs).",
+    "--dpi",
+    type=float,
+    default=96,
+    help="Pixel density of PNG, JPG and GIF output, in dots per inch. The layout is in CSS "
+    "pixels at 96 dpi (the default); 192 doubles the pixels at the same layout, 300 is print.",
 )
 @weather_skill.argument(
-    "--forecast",
-    type=Dataset("spatial"),
-    action="append",
-    help="Verification grid: forecast Zarr for that week at one lead; repeat, week-1 first "
-    "(input ids forecast1, forecast2, …).",
+    "--recipe",
+    nargs="?",
+    const="",
+    probe=True,
+    help="List the recipes (no NAME), or print recipe NAME's Jsonnet to copy and edit; draws nothing.",
 )
 @weather_skill.argument(
-    "--verify",
-    type=Dataset("any"),
-    action="append",
-    help="Verification grid: verify Zarr from the verify skill, once per --forecast, same order.",
+    "--dump-spec",
+    nargs="?",
+    const="-",
+    probe=True,
+    help="Print (-) or save (a path) the evaluated spec, @ references unresolved, and draw nothing.",
 )
-@weather_skill.argument(
-    "--mediogram",
-    action="store_true",
-    help="Mediogram at one point: -i the forecast Zarr, then -i the m-climate Zarr "
-    "(input ids forecast, mclimate); set layout.meta.geo.point in --spec.",
-)
-@weather_skill.argument(
-    "--animate",
-    action="store_true",
-    help="Play the map's times or steps as frames of one animated map instead of side-by-side "
-    "panels; takes the same -i / --layer inputs as a still map. -o must end in .html or .gif.",
-)
-@weather_skill.argument("--spec", type=parse_spec_arg, help=SPEC_ARGUMENT_HELP)
-@weather_skill.argument(
-    "--theme-file",
-    help="Theme JSON/TOML, or a shipped theme name (tropical_tidbits), layered on the "
-    "standard look: {template, palettes, defaults, styles, overlays}.",
-)
-@weather_skill.argument("--dump-spec", nargs="?", const="-", probe=True, help=DUMP_SPEC_HELP)
-def plot(
-    inputs,
-    output,
-    layer,
-    obs,
-    forecast,
-    verify,
-    mediogram,
-    animate,
-    spec,
-    theme_file,
-    dump_spec,
-    **kwargs,
-):
-    """Draw weather-skills Zarrs as maps, time series, scatter plots, wind roses, verification grids, mediograms, or animations."""
-    inputs = list(inputs or [])
-    files = [x.ds for x in inputs]
-    layers = list(layer or [])
-    grid = obs is not None or bool(forecast) or bool(verify)
-    if grid + bool(mediogram) + bool(animate) > 1:
-        raise UsageError("pick one of --obs/--forecast/--verify, --mediogram, or --animate")
-    # A dumped spec replays its own mode: an animation spec animates again.
-    replayed = ((spec.data.get("layout") or {}).get("meta") or {}).get("skill") if spec else None
-    animate = animate or (replayed == "plot --animate" and not files and not layers)
-    if grid:
-        if inputs or layers:
-            raise UsageError("--obs/--forecast/--verify make a verification grid; drop -i/--layer")
-        merged, datasets = build_verify_spec(obs, forecast, verify, spec)
-        return run(merged, None, datasets, output, dump_spec, theme_file=theme_file)
-    if mediogram:
-        if layers:
-            raise UsageError("--mediogram takes two -i inputs (forecast, m-climate), not --layer")
-        merged, datasets = build_mediogram_spec(files, spec)
-        return run(merged, None, datasets, output, dump_spec, theme_file=theme_file)
-    if replayed in ("plot --verify", "plot --mediogram") and not files and not layers:
-        # The dumped spec already holds every trace and its layout.
-        return run(spec.data, None, spec.opened(), output, dump_spec, theme_file=theme_file)
-    # Boundaries and masks go on -i maps too: an outline on every panel.
-    shapes = [x for x in layers if x.kind in ("outline", "mask")] if files else []
-    if shapes and len(shapes) == len(layers):
-        layers = []
-    if files and layers:
+def plot(input, output, spec, const, dpi, recipe, dump_spec, **kwargs):
+    """Draw weather-skills Zarrs with a Jsonnet spec that evaluates to a Plotly figure."""
+    if recipe is not None:
+        print(recipe_text(recipe))
+        return None
+    if spec is None:
         raise UsageError(
-            "pass -i/--input or --layer, not both (-i takes only outline: and mask: layers)"
+            "--spec is required: a .jsonnet file, a recipe name (--recipe lists them) or Jsonnet text"
         )
-    if animate and len(files) > 1:
-        raise UsageError(
-            "--animate plays one map: stack the inputs with --layer (heatmap:, contour:, "
-            "scatter:, quiver:, outline:, mask:) instead of several -i"
-        )
-    layout = {}
-    series = False
-    if layers:
-        data, datasets, mask = _layer_traces(layers)
-        datasets = spec_datasets(spec, datasets)
-        if mask:
-            layout["meta"] = {"geo": {"mask_geojson": mask}}
-    else:
-        cli = dict(zip(input_ids([x.name for x in inputs]), files, strict=True))
-        datasets = spec_datasets(spec, cli)
-        user = {t.get("uid"): t for t in (spec.data.get("data") or [])} if spec else {}
-        drawn = {key: _as_drawn(d, user.get(key)) for key, d in datasets.items()}
-        data = [_default_trace(key, d, user.get(key)) for key, d in drawn.items()]
-        # 1-D series share one x/y axis, one legend entry per file.
-        series = bool(data) and all(
-            t["type"] == "scatter" and "bind" not in t["meta"] for t in data
-        )
-        if series:
-            if len(data) > MAX_INPUTS:
-                raise UsageError(
-                    f"--input may be passed at most {MAX_INPUTS} times for series; got "
-                    f'{len(data)}. For ensemble members use meta.along "number" on one input'
-                )
-            for i, (key, d) in enumerate(datasets.items()):
-                data[i]["name"] = trace_label(d, i, key)
-        elif cli:
-            data = [
-                _default_trace(key, d, user.get(key), xaxis=None if i == 0 else f"x{i + 1}")
-                for i, (key, d) in enumerate(drawn.items())
-            ]
+    datasets = {}
+    for x in input or []:
+        if x.name in datasets:
+            raise UsageError(f"two inputs are named {x.name!r}; give each its own -i PATH=NAME")
+        if x.is_geojson():
+            if not Path(x.path).is_file():
+                raise UsageError(f"input not found: {x.path}")
+            datasets[x.name] = load_geojson(x.path)
         else:
-            data = []
-        for j, shape in enumerate(shapes):
-            if shape.kind == "mask":
-                layout["meta"] = {"geo": {"mask_geojson": shape.path}}
-                continue
-            for i in range(len(datasets)):
-                outline = {
-                    "uid": f"outline{j + 1}" + (f"-{i + 1}" if i else ""),
-                    "type": "scatter",
-                    "meta": {"bind": "geojson", "source": {"geojson": shape.path}},
-                }
-                if i:
-                    outline.update(xaxis=f"x{i + 1}", yaxis=f"y{i + 1}")
-                data.append(outline)
-    if not datasets and not any((t.get("meta") or {}).get("bind") == "geojson" for t in data):
-        if spec is None or not (spec.data.get("data")):
-            raise UsageError(
-                "pass -i/--input, --layer, or a --spec with data and layout.meta.inputs"
+            # Plain arrays, with units in CF form (g kg-1, mm day-1).
+            datasets[x.name] = dequantify_dataset(x.ds)
+    meta = {name: input_metadata(value) for name, value in datasets.items()}
+    consts = {}
+    for item in const or []:
+        key, _, text = item.partition("=")
+        try:
+            consts[key] = float(text)
+        except ValueError:
+            consts[key] = text
+    figure = evaluate(spec, meta, consts)
+    # A spec with no template gets the house one, not Plotly's grey-blue default.
+    figure.setdefault("layout", {}).setdefault("template", house_template())
+    spec.evaluated = figure
+    if dump_spec is not None:
+        text = json.dumps(figure, indent=2, ensure_ascii=False)
+        if dump_spec == "-":
+            print(text)
+        else:
+            Path(dump_spec).write_text(text + "\n")
+        return None
+    if output is None:
+        raise UsageError("--output is required unless --dump-spec is set")
+    outputs = output if isinstance(output, list) else [output]
+    # Lint: every key that can put data on the chart holds an @ reference, not typed-in values.
+    try:
+        check_bindings(figure)
+    except UnboundDataError as exc:
+        lines = []
+        unbound = False
+        for path, message in exc.problems:
+            unknown = re.match(r"unknown key for ([\w.]+)", message)
+            if unknown:
+                # A key Plotly doesn't have: say what to do instead.
+                kind, key = unknown.group(1).split(".")[-1], path.rsplit(".", 1)[-1]
+                message = f"a {kind} has no property {key!r}.{key_hint(kind, key)}"
+            unbound = unbound or "@binding" in message
+            lines.append(f"  {path}: {message}")
+        # How data gets in, only when a value is missing its @ binding.
+        footer = (
+            "\nData comes from the inputs: -i FILE=NAME, then '@NAME.var' in the key. A line or "
+            "point at fixed coordinates is a layout shape (name and showlegend: true give it a "
+            f"legend entry), or a scatter trace with no @ references at all, up to {MARK_POINTS} values "
+            "per key. A "
+            "constant in a trace that draws data is --const NAME=VALUE, then '@const.NAME'"
+            if unbound
+            else ""
+        )
+        raise UsageError(
+            f"the spec has {len(lines)} problem(s) before binding:\n" + "\n".join(lines) + footer
+        ) from None
+    # Bind: GeoJSON inputs resolve as lines ('@KENYA.x' / '@KENYA.y'), constants as '@const.NAME'.
+    sources = {
+        name: GeoLines(value) if isinstance(value, list) else value
+        for name, value in datasets.items()
+    }
+    sources["const"] = consts
+    resolved, _ = resolve(figure, sources)
+    fig = validate(resolved)
+    n_panels = len(list(fig.select_xaxes()))
+    stills = [p for p in outputs if Path(p).suffix.lower() not in (".html", ".htm", ".gif")]
+    if stills and n_panels > MAX_PANELS:
+        raise UsageError(
+            f"{n_panels} panels is too many for one image; the limit is {MAX_PANELS}. Pick "
+            "fewer, or play them as frames in .html / .gif"
+        )
+    if fig.frames and any(Path(p).suffix.lower() in (".html", ".htm") for p in outputs):
+        size = len(fig.to_json()) / 1e6
+        print(f"animation: {len(fig.frames)} frames, {size:.1f} MB of figure data", file=sys.stderr)
+        if size > LARGE_HTML_MB:
+            print(
+                f"Warning: the HTML will be large (~{size:.0f} MB); use fewer frames or a "
+                "smaller window",
+                file=sys.stderr,
             )
-    base = skeleton("plot --animate" if animate else "plot", datasets, data)
-    if layout.get("meta"):
-        base["layout"]["meta"].update(layout["meta"])
-    merged = merge_spec(base, spec.data if spec is not None else {})
-    if series:
-        warn_mixed_units(merged, datasets)
-        warn_disjoint_dates(merged, datasets)
-    return run(merged, None, datasets, output, dump_spec, theme_file=theme_file, animate=animate)
+    # Every output is checked before any is written.
+    for path in outputs:
+        suffix = Path(path).suffix.lower()
+        if suffix not in OUTPUT_SUFFIXES:
+            raise UsageError(
+                f"output {Path(path).name!r} must end in .png, .jpg, .pdf, .svg, .html or .gif "
+                f"(got {suffix or 'no suffix'})"
+            )
+        if suffix == ".gif" and not fig.frames:
+            raise UsageError(
+                f"output {Path(path).name!r}: a GIF plays the figure's frames, and this spec has "
+                "none; add frames, or write a still image to .png"
+            )
+    if not dpi > 0:
+        raise UsageError(f"--dpi must be above 0, got {dpi}")
+    # Plotly lays out in CSS pixels, 96 to the inch; kaleido's scale multiplies them.
+    written = [export(fig, path, scale=dpi / 96) for path in outputs]
+    return written if isinstance(output, list) else written[0]
 
-
-install_spec_help(plot)
 
 if __name__ == "__main__":
     plot()

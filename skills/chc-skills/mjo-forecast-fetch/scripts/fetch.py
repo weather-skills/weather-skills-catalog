@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core>=0.1.1",
+#   "weather-skills-core>=0.4.0",
 # ]
 # ///
 """Download the latest CPC CLIVAR MJO phase-space forecast diagram for one model as a PNG."""
@@ -17,7 +17,7 @@ from pathlib import Path
 from weather_skills_core import DataError, UsageError, weather_skill
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.4"
+_SKILL_VERSION = "0.0.5"
 
 # Latest diagrams are served at fixed filenames under this directory (updated in place).
 # Relative paths on the CLIVAR page resolve here:
