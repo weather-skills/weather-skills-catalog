@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core>=0.2.0",
+#   "weather-skills-core>=0.4.0",
 #   "pandas",
 # ]
 # ///
@@ -22,17 +22,36 @@ from weather_skills_core.units import (
     AGGREGATION_COVERAGE_COORD,
     AGGREGATION_PERIOD_ATTR,
     data_interval_of,
+    format_duration,
     infer_timestep,
     parse_aggregation_period,
+    stamp_data_interval,
 )
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.4"
+_SKILL_VERSION = "0.0.15"
 
 _TIME_LABELS = ("month", "year", "dayofyear", "month_group")
 _INITIALS = "JFMAMJJASOND"
 # Grid and station dims a sum must not add up (latitude, lon, station_id, ...).
 _SPATIAL_DIMS = frozenset((*names_for("lat"), *names_for("lon"), *names_for("point_id")))
+
+
+def _keep_covered(da, over, expected, weight, min_coverage, others):
+    """Leave out (NaN) data with less than ``min_coverage`` of its ``expected`` steps along ``over``.
+
+    Returns the kept data, the least share in each value once ``others`` are reduced too,
+    and how many slices were left out. Missing steps are never filled.
+    """
+    present = da.notnull()
+    if weight is not None and set(weight.dims) <= set(over):
+        # A partly complete input step counts as that fraction of a step.
+        present = present * weight
+    share = present.sum(over) / expected
+    complete = share >= min_coverage - 1e-12
+    dropped = int(((share > 0) & ~complete).sum())
+    share = share.where(complete)
+    return da.where(complete), share.min(others) if others else share, dropped
 
 
 @weather_skill(
@@ -54,7 +73,14 @@ _SPATIAL_DIMS = frozenset((*names_for("lat"), *names_for("lon"), *names_for("poi
 @weather_skill.argument(
     "--method",
     required=True,
-    choices=["mean", "std", "min", "max", "sum", "median"],
+    choices=["mean", "std", "min", "max", "sum", "median", "quantile"],
+)
+@weather_skill.argument(
+    "--quantile",
+    "-q",
+    type=float,
+    action="append",
+    help="Quantile between 0 and 1 for --method quantile (repeatable: 0.1 and 0.9 for a band).",
 )
 @weather_skill.argument(
     "--lat-weighted",
@@ -65,11 +91,13 @@ _SPATIAL_DIMS = frozenset((*names_for("lat"), *names_for("lon"), *names_for("poi
     "--min-coverage",
     type=float,
     help=(
-        "With a --by time label: blank values whose group has data for less than this share "
-        "(0-1) of its full calendar period. Default 1.0."
+        "Coverage check when a statistic combines time or step (with a --by time label, or "
+        "--method sum): data covering less than this fraction (0-1) of the expected steps is "
+        "left out (NaN). Expected steps are each --by group's calendar period, or every summed "
+        "step. Default 1.0: no gaps."
     ),
 )
-def summarize_dim(ds, variable, dim, by, method, lat_weighted, min_coverage, **kwargs):
+def summarize_dim(ds, variable, dim, by, method, quantile, lat_weighted, min_coverage, **kwargs):
     """Collapse named dimensions of a Zarr, or each group of a label coord, with a statistic."""
     if not dim and not by:
         raise UsageError("pass --dim, --by, or both")
@@ -84,10 +112,19 @@ def summarize_dim(ds, variable, dim, by, method, lat_weighted, min_coverage, **k
             raise UsageError(f"--by {b!r} is not a label coord (have {labels})")
     if by and lat_weighted:
         raise UsageError("--lat-weighted cannot be combined with --by")
+    if (method == "quantile") != bool(quantile):
+        raise UsageError("--quantile goes with --method quantile, which needs at least one")
+    quantile = list(dict.fromkeys(quantile or []))
+    if any(not 0 <= q <= 1 for q in quantile):
+        raise UsageError(f"--quantile must be between 0 and 1, got {quantile}")
+    if by and len(quantile) > 1:
+        raise UsageError("--by takes one --quantile; run once per quantile")
     time_by = [b for b in by if "time" in ds[b].dims]
-    if min_coverage is not None and not time_by:
+    time_sum = method == "sum" and not by and any(d in ("time", "step") for d in dims)
+    if min_coverage is not None and not (time_by or time_sum):
         raise UsageError(
-            f"--min-coverage needs a --by label along time ({', '.join(_TIME_LABELS)})"
+            f"--min-coverage needs a --by label along time ({', '.join(_TIME_LABELS)}) "
+            "or --method sum over time or step"
         )
     min_coverage = 1.0 if min_coverage is None else min_coverage
     if not 0.0 <= min_coverage <= 1.0:
@@ -100,13 +137,47 @@ def summarize_dim(ds, variable, dim, by, method, lat_weighted, min_coverage, **k
             )
     # Read before the label coords on time are dropped below.
     seasons = ds["month_group"].values if "month_group" in ds.coords and time_by else None
-    weight = None
-    if AGGREGATION_COVERAGE_COORD in ds.coords and ds[AGGREGATION_COVERAGE_COORD].dims == ("time",):
-        # An input interval that was itself 3/7 complete counts as 3/7 of a step.
-        weight = np.nan_to_num(np.asarray(ds[AGGREGATION_COVERAGE_COORD].values, dtype=float))
+    weight = ds.coords.get(AGGREGATION_COVERAGE_COORD)
+    weight = None if weight is None else weight.fillna(0)
     # The dims a label spans collapse into one entry per label.
     group_dims = list(dict.fromkeys(d for b in by for d in ds[b].dims))
     dims = list(dict.fromkeys([*group_dims, *dims]))
+    bounds_period = None
+    if time_by:
+        bounds = (
+            ds["time"].attrs.get("bounds") or ds["time"].encoding.get("bounds") or "time_bounds"
+        )
+        cells = ds[bounds].values if bounds in ds.variables else None
+        if cells is None and data_interval_of(ds) is None:
+            # No cells stamped: core infers calendar cells for month, quarter or year starts.
+            try:
+                inferred = stamp_data_interval(ds, dim="time")
+            except UsageError:
+                inferred = ds
+            if "time_bounds" in inferred.variables:
+                cells = inferred["time_bounds"].values
+        if cells is not None:
+            order = np.argsort(cells[:, 0])
+            starts, ends = cells[order, 0], cells[order, 1]
+            # Rolling windows overlap: a cell starts before the previous one ends.
+            rolling_windows = (starts[1:] < ends[:-1]).any()
+            if rolling_windows:
+                # Each window stays at its time label, as label-group places it, not at
+                # its window start, so the bounds are not used below.
+                cells = None
+        if cells is not None and not np.array_equal(cells[:, 0], ds["time"].values):
+            # A step belongs where its cell starts (as label-group labels it), not its label.
+            ds = ds.assign_coords(time=cells[:, 0])
+        if cells is not None and cells.dtype.kind == "M":
+            # Cells of whole calendar months have no fixed length: read their step as months.
+            months = cells.astype("datetime64[M]")
+            spans = (months[:, 1] - months[:, 0]).astype(int)
+            on_month_starts = (months.astype(cells.dtype) == cells).all()
+            if on_month_starts and spans.min() == spans.max() > 0:
+                bounds_period = f"{spans[0]} month"
+        # The cells are read; grouped output has new ones, and a bounds data var would be reduced.
+        if bounds in ds.variables:
+            ds = ds.drop_vars(bounds)
     # Other label coords on the grouped dims (admin_1_name, ...) cannot survive the collapse.
     ds = ds.drop_vars(
         [c for c in ds.coords if c not in (*by, *ds.dims) and set(ds[c].dims) & set(group_dims)]
@@ -167,32 +238,31 @@ def summarize_dim(ds, variable, dim, by, method, lat_weighted, min_coverage, **k
                 "toward a --by group; drop the repeated steps first"
             )
         first = times[0]
-        period = next(
-            (
-                ds[v].attrs[AGGREGATION_PERIOD_ATTR]
-                for v in ds.data_vars
-                if isinstance(ds[v].attrs.get(AGGREGATION_PERIOD_ATTR), str)
-            ),
-            None,
-        ) or data_interval_of(ds)
-        calendar = re.fullmatch(r"\s*(\d+)\s*(month|year)s?\s*", period or "")
-        if calendar or (period or "").strip() == "1 dekad":
-            # Calendar steps: labels must be month starts (dekads on days 1, 11, 21).
-            every = (
-                int(calendar.group(1)) * (12 if calendar.group(2) == "year" else 1)
-                if calendar
-                else 1
+        period = (
+            data_interval_of(ds)
+            or next(
+                (
+                    ds[v].attrs[AGGREGATION_PERIOD_ATTR]
+                    for v in ds.data_vars
+                    if isinstance(ds[v].attrs.get(AGGREGATION_PERIOD_ATTR), str)
+                ),
+                None,
             )
+            or bounds_period
+        )
+        calendar = re.fullmatch(r"\s*(\d+)\s*(month|year)s?\s*", period or "")
+        if calendar:
+            # Calendar steps: labels must be month starts.
+            every = int(calendar.group(1)) * (12 if calendar.group(2) == "year" else 1)
             n = (times[-1].year - first.year) * 12 + times[-1].month - first.month
             full = [
                 first.replace(
                     year=first.year + (first.month - 1 + k) // 12,
                     month=(first.month - 1 + k) % 12 + 1,
-                    day=day,
+                    day=1,
                 )
                 for k in range(-24, n + 25)
                 if k % every == 0
-                for day in ((1,) if calendar else (1, 11, 21))
             ]
             longer_than_a_day = True
         else:
@@ -206,10 +276,12 @@ def summarize_dim(ds, variable, dim, by, method, lat_weighted, min_coverage, **k
             pd.DatetimeIndex(full) if isinstance(times, pd.DatetimeIndex) else xr.CFTimeIndex(full)
         )
         at = full.get_indexer(times)
-        if (at < 0).any():
+        irregular = bool((at < 0).any())
+        if irregular and min_coverage > 0:
             raise UsageError(
                 f"time values do not fall on a regular {period or 'time'} axis, so the steps "
-                "each --by group should hold cannot be counted"
+                "each --by group should hold cannot be counted; pass --min-coverage 0 to "
+                "summarize each group from the steps it has"
             )
         # Labels at each step's start, and at its last second to catch a step (a week
         # from 27 May) that runs into the next group.
@@ -238,48 +310,72 @@ def summarize_dim(ds, variable, dim, by, method, lat_weighted, min_coverage, **k
                     "month_group": season.astype(str),
                 }
             )
-        rebuilt, rebuilt_end = labelled
-        change = np.zeros(full.size, dtype=bool)
-        grouped = np.ones(full.size, dtype=bool)
-        for b in time_by:
-            if not np.array_equal(rebuilt[b][at], ds[b].values):
-                raise UsageError(
-                    f"--by {b!r} does not hold the calendar {b} of each time step, as "
-                    "label-group writes it, so its full calendar period is unknown"
-                )
-            # A step of a day or less belongs to the day it is stamped on.
-            crossing = rebuilt[b][at] != rebuilt_end[b][at]
-            if longer_than_a_day and crossing.any():
-                raise UsageError(
-                    f"the {period or 'time'} step starting {times[np.argmax(crossing)]} runs "
-                    f"into the next --by {b} group, so the group would take in time outside "
-                    "it; aggregate to steps that fit inside the groups (daily, or monthly for "
-                    "months and month groups)"
-                )
-            change[1:] |= rebuilt[b][1:] != rebuilt[b][:-1]
-            if b == "month_group":
-                grouped &= rebuilt[b] != ""
-        run = np.cumsum(change)
-        touched = np.isin(run, run[at]) & grouped
-        if touched[0] or touched[-1]:
-            raise UsageError("a --by time group lasts over a year, so its full period is unknown")
         t = list(dict.fromkeys(ds[b].dims for b in by)).index(("time",))
-        groups[t] = [
-            (
-                labels,
-                isel,
-                box,
-                int(
-                    (
-                        touched
-                        & np.logical_and.reduce(
-                            [rebuilt[b] == label_values[b][i] for b, i in labels.items()]
-                        )
-                    ).sum()
-                ),
-            )
-            for labels, isel, box, _ in groups[t]
-        ]
+        if irregular:
+            # No regular axis to count against: each group expects the steps it has.
+            groups[t] = [
+                (
+                    labels,
+                    isel,
+                    box,
+                    int(
+                        np.logical_and.reduce(
+                            [
+                                ds[b].values == label_values[b][i]
+                                for b, i in labels.items()
+                                if b in time_by
+                            ]
+                        ).sum()
+                    ),
+                )
+                for labels, isel, box, _ in groups[t]
+            ]
+        else:
+            rebuilt, rebuilt_end = labelled
+            change = np.zeros(full.size, dtype=bool)
+            grouped = np.ones(full.size, dtype=bool)
+            for b in time_by:
+                if not np.array_equal(rebuilt[b][at], ds[b].values):
+                    raise UsageError(
+                        f"--by {b!r} does not hold the calendar {b} of each time step, as "
+                        "label-group writes it, so its full calendar period is unknown"
+                    )
+                # A step of a day or less belongs to the day it is stamped on.
+                crossing = rebuilt[b][at] != rebuilt_end[b][at]
+                if longer_than_a_day and crossing.any():
+                    raise UsageError(
+                        f"the {period or 'time'} step starting {times[np.argmax(crossing)]} runs "
+                        f"into the next --by {b} group, so the group would take in time outside "
+                        "it; aggregate to steps that fit inside the groups (daily, or monthly for "
+                        "months and month groups)"
+                    )
+                change[1:] |= rebuilt[b][1:] != rebuilt[b][:-1]
+                if b == "month_group":
+                    grouped &= rebuilt[b] != ""
+            run = np.cumsum(change)
+            touched = np.isin(run, run[at]) & grouped
+            if touched[0] or touched[-1]:
+                raise UsageError(
+                    "a --by time group lasts over a year, so its full period is unknown"
+                )
+            groups[t] = [
+                (
+                    labels,
+                    isel,
+                    box,
+                    int(
+                        (
+                            touched
+                            & np.logical_and.reduce(
+                                [rebuilt[b] == label_values[b][i] for b, i in labels.items()]
+                            )
+                        ).sum()
+                    ),
+                )
+                for labels, isel, box, _ in groups[t]
+            ]
+        # The longest group's full calendar run, in steps: the span a sum by it covers.
+        longest_group = max(expected for _, _, _, expected in groups[t])
 
     lat_dim = None
     if lat_weighted:
@@ -322,9 +418,12 @@ def summarize_dim(ds, variable, dim, by, method, lat_weighted, min_coverage, **k
                 "--method mean for a regional value, after summing over time in a "
                 "separate call. Only dimensionless variables (units 1) sum over space"
             )
+        share = None  # the coverage of each value, when it was checked
         if by:
             # min_count=1 / ddof=1 as below. Combinations with no cells stay NaN.
             kw = {"min_count": 1} if method == "sum" else {"ddof": 1} if method == "std" else {}
+            if method == "quantile":
+                kw = {"q": quantile[0]}
             kept = [d for d in da.dims if d not in rdims]
             da = da.pint.dequantify()  # values are filled into numpy; units go back on below
             values = None
@@ -336,22 +435,14 @@ def summarize_dim(ds, variable, dim, by, method, lat_weighted, min_coverage, **k
                     if box is not None:
                         sub = sub.where(box)
                 if time_by:
-                    # Coverage is per input cell (station, grid cell, member):
-                    # a cell missing too many of the group's calendar steps is
-                    # left out before any spatial reduction, so cells missing
-                    # different days never add up to a complete group.
-                    present = sub.notnull()
-                    if weight is not None:
-                        present = present * xr.DataArray(weight[index["time"]], dims="time")
+                    # Checked before any other reduction, so slices missing different
+                    # steps never add up to a complete group.
                     expected = next(n for _, _, _, n in parts if n is not None)
-                    cell_share = present.sum("time") / expected
-                    complete = cell_share >= min_coverage - 1e-12
-                    dropped += int(((cell_share > 0) & ~complete).sum())
-                    sub = sub.where(complete)
                     others = [d for d in rdims if d != "time"]
-                    # The least-covered cell that went into each value.
-                    share = cell_share.where(complete)
-                    share = share.min(others) if others else share
+                    sub, group_share, n = _keep_covered(
+                        sub, ["time"], expected, weight, min_coverage, others
+                    )
+                    dropped += n
                 reduced = getattr(sub, method)(dim=rdims, keep_attrs=True, **kw)
                 if values is None:
                     template = reduced
@@ -361,46 +452,34 @@ def summarize_dim(ds, variable, dim, by, method, lat_weighted, min_coverage, **k
                 where = {b: i for labels, _, _, _ in parts for b, i in labels.items()}
                 values[(..., *(where[b] for b in by))] = reduced.transpose(*kept).values
                 if time_by:
-                    coverage[(..., *(where[b] for b in by))] = share.transpose(*kept).values
+                    coverage[(..., *(where[b] for b in by))] = group_share.transpose(*kept).values
             coords = {
                 **{c: v for c, v in template.coords.items() if set(v.dims) <= set(kept)},
                 **{b: label_values[b] for b in by},
             }
-            if dropped:
-                print(
-                    f"{var}: left out {dropped} cell-group(s) with data for less than "
-                    f"--min-coverage {min_coverage:g} of the group's calendar time steps",
-                    file=sys.stderr,
-                )
             out[var] = xr.DataArray(values, dims=[*kept, *by], coords=coords, attrs=template.attrs)
-            if time_by and method == "sum" and min_coverage < 1.0:
-                # Kept so the output records which sums are estimates.
-                partial = int((np.isfinite(values) & (coverage < 1.0 - 1e-12)).sum())
-                if partial:
-                    print(
-                        f"WARNING: {partial} {var} sum(s) come from groups missing some time "
-                        f"steps (--min-coverage {min_coverage:g}); missing steps are not filled, "
-                        "so those sums are estimates from partial data and fall short of the "
-                        f"full-period total. See {var}_coverage in the output.",
-                        file=sys.stderr,
-                    )
-                out[f"{var}_coverage"] = xr.DataArray(
-                    coverage,
-                    dims=[*kept, *by],
-                    coords=coords,
-                    attrs={
-                        "long_name": f"Share of each group's calendar time steps with {var} data",
-                        "units": "1",
-                    },
-                )
-                out[var].attrs["ancillary_variables"] = f"{var}_coverage"
+            if time_by:
+                share = xr.DataArray(coverage, dims=[*kept, *by], coords=coords)
             if units is not None:
                 out[var] = out[var].copy(data=out[var].data * units)
+        elif method == "sum" and over_time:
+            expected = int(np.prod([da.sizes[d] for d in over_time]))
+            others = [d for d in rdims if d not in over_time]
+            da, share, dropped = _keep_covered(
+                da, over_time, expected, weight, min_coverage, others
+            )
+            out[var] = da.sum(dim=rdims, keep_attrs=True, min_count=1)
         elif method == "sum":
             # min_count=1: all-NaN → NaN, not 0
             out[var] = da.sum(dim=rdims, keep_attrs=True, min_count=1)
         elif method == "std":
             out[var] = da.std(dim=rdims, keep_attrs=True, ddof=1)
+        elif method == "quantile":
+            # One quantile leaves a scalar quantile coord; several add a quantile dim.
+            q = quantile[0] if len(quantile) == 1 else quantile
+            out[var] = da.pint.dequantify().quantile(q, dim=rdims, keep_attrs=True)
+            if da.pint.units is not None:
+                out[var] = out[var].copy(data=out[var].data * da.pint.units)
         elif method == "mean" and lat_weighted and lat_dim in rdims:
             out[var] = (
                 da.pint.dequantify()
@@ -411,16 +490,64 @@ def summarize_dim(ds, variable, dim, by, method, lat_weighted, min_coverage, **k
                 out[var] = out[var].copy(data=out[var].data * da.pint.units)
         else:
             out[var] = getattr(da, method)(dim=rdims, keep_attrs=True)
+        if share is not None:
+            if dropped:
+                print(
+                    f"{var}: left out {dropped} slice(s) with data for less than "
+                    f"--min-coverage {min_coverage:g} of their expected time steps",
+                    file=sys.stderr,
+                )
+            if method == "sum" and min_coverage < 1.0:
+                # Kept so the output records which sums are estimates.
+                partial = int((out[var].notnull() & (share < 1.0 - 1e-12)).sum())
+                if partial:
+                    print(
+                        f"WARNING: {partial} {var} sum(s) are missing some of their expected "
+                        f"time steps (--min-coverage {min_coverage:g}); missing steps are not "
+                        "filled, so those sums are estimates from partial data and fall short "
+                        f"of the full-period total. See {var}_coverage in the output.",
+                        file=sys.stderr,
+                    )
+                out[f"{var}_coverage"] = share.assign_attrs(
+                    long_name=f"Share of expected time steps with {var} data", units="1"
+                )
+                out[var].attrs["ancillary_variables"] = f"{var}_coverage"
+        if method == "quantile":
+            # xarray's quantile drops coords the reduction leaves alone (a forecast's
+            # scalar init time); keep them, as the other statistics do.
+            out[var] = out[var].assign_coords(
+                {
+                    c: v
+                    for c, v in ds[var].coords.items()
+                    if c not in out[var].coords and not set(v.dims) & {*rdims, *by}
+                }
+            )
         # Record the statistic (CF cell_methods). A spread or a sum is not the
         # input quantity, so its long_name must not read "Total precipitation".
         attrs = dict(out[var].attrs)
         cf_method = {"std": "standard_deviation", "min": "minimum", "max": "maximum"}
         step = f"{': '.join(rdims)}: {cf_method.get(method, method)}"
+        if method == "quantile":
+            step += f" {', '.join(f'{q:g}' for q in quantile)}"
+        if method == "mean" and lat_weighted and lat_dim in rdims:
+            step += " (latitude-weighted)"
         if by:
             step += f" (grouped by {', '.join(by)})"
         attrs["cell_methods"] = (
             f"{attrs['cell_methods']} {step}" if attrs.get("cell_methods") else step
         )
+        period = attrs.get(AGGREGATION_PERIOD_ATTR)
+        if method == "sum" and over_time and isinstance(period, str):
+            # A sum spans all the steps it adds: the input period times the step count
+            # (the longest group's count with --by).
+            n = longest_group if time_by else int(np.prod([ds.sizes[d] for d in over_time]))
+            calendar = re.fullmatch(r"\s*(\d+)\s*(month|year)s?\s*", period)
+            if calendar:
+                attrs[AGGREGATION_PERIOD_ATTR] = f"{int(calendar.group(1)) * n} {calendar.group(2)}"
+            else:
+                attrs[AGGREGATION_PERIOD_ATTR] = format_duration(
+                    parse_aggregation_period(period) * n
+                )
         if method in ("std", "sum"):
             label = "Standard deviation" if method == "std" else "Sum"
             what = attrs.get("long_name") or attrs.get("standard_name") or var

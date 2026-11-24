@@ -1,15 +1,13 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
-#   "weather-skills-core>=0.2.0",
+#   "weather-skills-core>=0.4.0",
 #   "pillow",
 # ]
 # ///
-"""Print the processing history recorded on a Zarr or plot image as a lineage, JSON, or a script that regenerates it."""
+"""Print the processing history recorded on a Zarr, figure, GeoJSON or table as a lineage, JSON, or a script that regenerates it."""
 
-import html
 import json
-import re
 import shlex
 from pathlib import Path
 
@@ -19,14 +17,13 @@ from weather_skills_core.provenance import (
     SOURCE_ATTR,
     coerce_chain,
     parse_chain,
+    read_raw_history,
     validate_chain,
 )
 
-DEFAULT_REPO = "https://github.com/rhiza-research/weather-skills"
-DEFAULT_CLI = "forecasting-skills"
-# Ref a step runs from when it recorded no commit: the CLI above lives on dev
-# (the default branch names its CLI differently).
-DEFAULT_REF = "dev"
+DEFAULT_REPO = "https://github.com/weather-skills/weather-skills-catalog"
+# Ref a step runs from when it recorded no commit.
+DEFAULT_REF = "main"
 # Joins whose inputs are not a repeated --input, in the order the decorator
 # records them (declaration order).
 JOIN_FLAGS = {
@@ -34,14 +31,27 @@ JOIN_FLAGS = {
     "standardize-anomaly": ["--input", "--climatology"],
     "point-value": ["--input", "--points"],
 }
+# Skills whose recorded args include a positional, and skills that write their
+# stamped file through a flag other than --output.
+POSITIONAL_ARGS = {"resolve-region": "code"}
+OUTPUT_FLAGS = {"resolve-region": "--geojson"}
 _EXIF_USER_COMMENT = 0x9286
-_HTML_META_RE = re.compile(
-    rf'<meta\s+name=["\']{HISTORY_ATTR}["\']\s+content=["\'](.*?)["\']\s*/?>',
-    re.IGNORECASE | re.DOTALL,
+# Other files the skills stamp; core reads them (tables from their sidecar).
+_OTHER_SUFFIXES = (
+    ".html",
+    ".htm",
+    ".gif",
+    ".pdf",
+    ".svg",
+    ".geojson",
+    ".json",
+    ".csv",
+    ".xlsx",
+    ".xlsm",
 )
 
 # Auto-populated by the version-bump CI workflow. Do not edit manually.
-_SKILL_VERSION = "0.0.4"
+_SKILL_VERSION = "0.0.12"
 
 
 def _parent_histories(step: dict) -> list[tuple[str, list]]:
@@ -63,7 +73,8 @@ def _read_raw_histories(path: Path) -> tuple[dict, str | None]:
 
     A zarr keeps one store attr; a PNG keeps tEXt keys (``weather_skills_history``
     and, for older two-input plots, ``weather_skills_history_<label>``); a JPEG
-    keeps the EXIF UserComment; an HTML figure keeps a ``<meta>`` tag.
+    keeps the EXIF UserComment; every other stamped file is read by core's
+    ``read_raw_history``.
     """
     if not path.exists():
         raise UsageError(f"Error: {path} not found.", prefix=False)
@@ -100,11 +111,15 @@ def _read_raw_histories(path: Path) -> tuple[dict, str | None]:
             if (key == HISTORY_ATTR or key.startswith(f"{HISTORY_ATTR}_")) and info[key]:
                 raw[key] = info[key]
         return raw, None
-    if path.is_file() and suffix in (".html", ".htm"):
-        match = _HTML_META_RE.search(path.read_text(encoding="utf-8", errors="replace"))
-        return ({HISTORY_ATTR: html.unescape(match.group(1))} if match else {}), None
+    if path.is_file() and suffix in _OTHER_SUFFIXES:
+        try:
+            raw = read_raw_history(path)
+        except Exception as exc:  # noqa: BLE001
+            raise UsageError(f"Error: could not read {path}: {exc}", prefix=False) from None
+        return ({HISTORY_ATTR: raw} if raw else {}), None
     raise UsageError(
-        f"Error: {path} is neither a zarr directory nor a .png/.jpg/.html figure; "
+        f"Error: {path} is neither a zarr directory nor a file a skill stamps "
+        "(.png, .jpg, .gif, .html, .pdf, .svg, .geojson, .json, .csv, .xlsx); "
         "cannot inspect provenance.",
         prefix=False,
     )
@@ -227,15 +242,16 @@ def _command(step: dict, inputs: list, output: str) -> str:
     repo = step.get("repo") if isinstance(step.get("repo"), str) and step["repo"] else DEFAULT_REPO
     commit = step.get("commit")
     ref = commit if isinstance(commit, str) and commit else DEFAULT_REF
-    # weather-skills (or a fork) has the CLI. Another repo may name its CLI
-    # differently or have none: run the skill's one script from a checkout, as
-    # skills-runner does.
-    if repo.rsplit("/", 1)[-1] == DEFAULT_REPO.rsplit("/", 1)[-1]:
-        parts = ["uvx", "--from", f"git+{repo}@{ref}", DEFAULT_CLI, skill]
-    else:
-        checkout = f'"$(_checkout {shlex.quote(repo)} {shlex.quote(ref)})"'
-        parts = ["uv", "run", "--script", f"{checkout}/skills/{skill}/scripts/*.py"]
+    # Run the skill's one script from a checkout at that ref, as skills-runner
+    # does: works for any repo, whatever its CLI was called at that commit.
+    script = f'"$(_script {shlex.quote(repo)} {shlex.quote(ref)} {shlex.quote(skill)})"'
+    parts = ["uv", "run", "--script", script]
+    positional = POSITIONAL_ARGS.get(skill)
+    if positional in args:
+        parts.append(shlex.quote(str(args[positional])))
     for dest, value in sorted(args.items()):
+        if dest == positional:
+            continue
         flag = "--" + dest.replace("_", "-")
         if value is None or value is False:
             continue
@@ -253,7 +269,7 @@ def _command(step: dict, inputs: list, output: str) -> str:
                 parts += [flag, shlex.quote(str(item))]
     for flag, path in inputs:
         parts += [flag, shlex.quote(path)]
-    parts += ["--output", shlex.quote(output)]
+    parts += [OUTPUT_FLAGS.get(skill, "--output"), shlex.quote(output)]
     line = " ".join(parts)
     if step.get("dirty") is True:
         return (
@@ -263,11 +279,22 @@ def _command(step: dict, inputs: list, output: str) -> str:
     return line
 
 
+def _recorded_path(item) -> tuple:
+    """``(path, sep, name)`` of a recorded PATH or PATH=NAME arg item."""
+    path, sep, name = str(item).rpartition("=")
+    return (path, sep, name) if sep else (str(item), "", "")
+
+
 def _emit_graph(chain: list, prefix: str, final_output: str) -> list:
     """Emit one command per step; a join step first reproduces each parent subgraph.
 
     A join can sit anywhere on the path (its output feeding later steps), so every
     step is checked, and nested joins recurse.
+
+    A step whose args name every file it read (core records each input's path)
+    is replayed from its args alone: each named file becomes the file the replay
+    makes for it, and a file with no history is read from its recorded path.
+    A step whose args do not name its inputs gets its input flags added.
     """
     lines = []
     prev = None
@@ -281,6 +308,21 @@ def _emit_graph(chain: list, prefix: str, final_output: str) -> list:
         output = final_output if i == n else f"{prefix}{i}.zarr"
         flags = JOIN_FLAGS.get(skill, [])
         branches = _parent_histories(step)
+        args = step.get("args") if isinstance(step.get("args"), dict) else {}
+        read = [
+            item.get("basename")
+            for item in (step_input if isinstance(step_input, list) else [step_input])
+            if isinstance(item, dict)
+        ]
+        named = {
+            Path(_recorded_path(v)[0]).name
+            for value in args.values()
+            for v in (value if isinstance(value, list) else [value])
+            if isinstance(v, str)
+        }
+        recorded = bool(read) and all(name in named for name in read)
+        # Basename of each file this step read -> the file the replay makes for it.
+        replay = {}
 
         if len(branches) >= 2:
             branch_outputs = []
@@ -290,6 +332,9 @@ def _emit_graph(chain: list, prefix: str, final_output: str) -> list:
                 lines.append(f"# --- input branch {label} ---")
                 if history:
                     lines += _emit_graph(history, f"{prefix}{label}_", branch_out)
+                    replay[basename] = branch_out
+                elif recorded:
+                    lines.append(f"# branch {label} is {basename}, read from its recorded path.")
                 else:
                     lines.append(
                         f"# branch {label} records no steps; "
@@ -315,10 +360,27 @@ def _emit_graph(chain: list, prefix: str, final_output: str) -> list:
             inputs = []
         elif prev is not None:
             inputs = [("--input", prev)]
+        elif recorded:
+            inputs = []
         else:
             lines.append(f"# step {i} ({skill})'s input is an artifact outside this chain;")
             lines.append("# reproduce it separately and replace <UPSTREAM> below.")
             inputs = [("--input", "<UPSTREAM>")]
+
+        if recorded:
+            if prev is not None and len(branches) < 2:
+                replay[read[0]] = prev
+            relinked = {}
+            for dest, value in args.items():
+                items = []
+                for item in value if isinstance(value, list) else [value]:
+                    path, sep, name = (
+                        _recorded_path(item) if isinstance(item, str) else ("", "", "")
+                    )
+                    base = Path(path).name
+                    items.append(replay[base] + sep + name if base in replay else item)
+                relinked[dest] = items if isinstance(value, list) else items[0]
+            step, inputs = {**step, "args": relinked}, []
 
         lines.append(_command(step, inputs, output))
         prev = output
@@ -326,17 +388,27 @@ def _emit_graph(chain: list, prefix: str, final_output: str) -> list:
 
 
 def _with_checkout_helper(lines: list) -> list:
-    """Define ``_checkout`` after the header when a step runs from a repo checkout."""
-    if not any("$(_checkout " in line for line in lines):
+    """Define ``_script`` after the header when a step runs from a repo checkout."""
+    if not any("$(_script " in line for line in lines):
         return lines
     helper = [
-        "# Clone each repo once per ref into ./_checkouts and print its path.",
-        "_checkout() {",
+        "# Clone each repo once per ref into ./_checkouts and print the skill's script.",
+        "# Skills sit at skills/<pack>/<skill> or skills/<skill>.",
+        "_script() {",
         '  local dir="_checkouts/${1##*/}@$2"',
         '  if [ ! -d "$dir" ]; then',
-        '    git clone -q "$1" "$dir" && git -C "$dir" checkout -q "$2"',
+        "    # A ref that won't check out must not leave the default branch behind.",
+        '    if ! { git clone -q "$1" "$dir" && git -C "$dir" checkout -q "$2"; }; then',
+        '      rm -rf "$dir"',
+        '      echo "_script: cannot check out $1 at $2" >&2',
+        "      return 1",
+        "    fi",
         "  fi",
-        '  echo "$dir"',
+        '  for f in "$dir"/skills/*/"$3"/scripts/*.py "$dir"/skills/"$3"/scripts/*.py; do',
+        '    if [ -e "$f" ]; then echo "$f"; return; fi',
+        "  done",
+        '  echo "_script: no script for $3 in $dir" >&2',
+        "  return 1",
         "}",
         "",
     ]
@@ -404,7 +476,7 @@ def _render_script(data: dict) -> None:
     "-i",
     "--input",
     required=True,
-    help="Artifact to inspect: a zarr dir or a .png, .jpg, or .html figure.",
+    help="Artifact to inspect: a zarr dir, a figure, a GeoJSON, or a CSV/Excel table.",
 )
 @weather_skill.argument(
     "--format",
@@ -418,7 +490,7 @@ def _render_script(data: dict) -> None:
     help="Validate weather_skills_history schema (exit 0/1/2).",
 )
 def provenance(input, format, check, **kwargs):
-    """Print the processing history recorded on a Zarr or plot image as a lineage, JSON, or a script that regenerates it."""
+    """Print the processing history recorded on a Zarr, figure, GeoJSON or table as a lineage, JSON, or a script that regenerates it."""
     if check:
         code, report = _run_check(Path(input))
         if code == 0:
