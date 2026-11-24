@@ -41,6 +41,18 @@ npx skillkit install weather-skills/weather-skills-catalog --all --yes
 npx skillkit install weather-skills/weather-skills-catalog --skill=ecmwf-fetch
 ```
 
+### As a Claude Code plugin
+
+The `weather-skills` plugin bundles every skill in the catalog with the `forecaster` and `plotting` agents:
+
+```bash
+claude plugin marketplace add weather-skills/weather-skills-catalog
+claude plugin install weather-skills@weather-skills
+claude --agent weather-skills:forecaster --allowedTools "Skill(weather-skills:*)"
+```
+
+The plugin reads each provider's folder under `skills/` on `main`, listed in `.claude-plugin/plugin.json`. A pull request that adds a provider also adds its folder there.
+
 ### As an MCP
 
 A hosted MCP will be coming soon.
